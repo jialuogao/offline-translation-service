@@ -1,0 +1,11 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# 打包器需要执行安装脚本；pnpm 12 默认拦截（strictDepBuilds）。
+# 只放行这个已审阅的依赖，其余仍然默认拦截。
+# 注：设计稿原指定的 better-sqlite3 无法在本机安装（Node 26 无预编译产物、缺少
+# VS C++ 工具链），已改用 Node 内置 node:sqlite，详见 DESIGN.md §2 与
+# docs/impl-notes/collections-and-db.md。
+allowBuilds:
+  esbuild: true

@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node", "vitest/globals"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "noEmit": true,
+    // 测试直接跑 contracts 源码，因此不要求在类型检查前先构建该包。
+    // 注意：`paths` 的取值相对 `baseUrl`（仓库根），不是相对本文件。
+    // server / web 的构建走 packages/contracts/dist（各自的 tsconfig.build.json）。
+    "paths": {
+      "@ots/contracts": ["packages/contracts/src/index.ts"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx"]
+}

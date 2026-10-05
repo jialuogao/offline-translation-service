@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    // fetch / Response / ReadableStream 的类型来自 DOM lib；后端只把它们当作
+    // 标准 Web API 使用（Node 18+ 已内置），不涉及任何浏览器专有代码。
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"]
+}

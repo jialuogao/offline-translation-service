@@ -1,0 +1,28 @@
+{
+  "name": "offline-translation-service",
+  "private": true,
+  "version": "0.1.0",
+  "description": "本机离线中英互译服务：Node 后端 + LM Studio 本地推理 + React Web 客户端",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm run build:web && pnpm --filter @ots/server dev",
+    "build": "pnpm run build:contracts && pnpm run build:web && pnpm --filter @ots/server build",
+    "build:contracts": "pnpm --filter @ots/contracts build",
+    "build:web": "pnpm --filter @ots/web build",
+    "build:server": "pnpm --filter @ots/server build",
+    "start": "pnpm --filter @ots/server start",
+    "test": "pnpm run build:contracts && vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "typecheck": "pnpm run build:contracts && pnpm -r typecheck && tsc -p tests/tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "jsdom": "^30.1.1",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

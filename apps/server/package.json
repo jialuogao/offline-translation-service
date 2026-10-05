@@ -1,0 +1,23 @@
+{
+  "name": "@ots/server",
+  "private": true,
+  "version": "0.1.0",
+  "description": "离线翻译服务后端：Express + SQLite + LM Studio（DESIGN.md §3）",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ots/contracts": "workspace:*",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
