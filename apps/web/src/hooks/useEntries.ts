@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { type Entry, type EntryPage } from '@ots/contracts';
+import { type Entry, type EntryPage, type Lang } from '@ots/contracts';
 import { errorMessage, requestJson } from '../api/client';
 
 /** 与后端默认值一致（DESIGN.md §5.2 / §11 的 MAX_PAGE_SIZE 上限为 200）。 */
@@ -25,6 +25,7 @@ export interface UseEntriesResult {
   setPage: (page: number) => void;
   setPageSize: (pageSize: number) => void;
   refresh: () => Promise<void>;
+  addEntry: (text: string, sourceLang: Lang, targetLang: Lang) => Promise<void>;
   deleteEntry: (id: string) => Promise<void>;
   batchDelete: (ids: string[]) => Promise<void>;
   clearCollection: () => Promise<void>;
@@ -145,6 +146,31 @@ export function useEntries(
     [refresh],
   );
 
+  /** 不翻译直接写库（DESIGN.md §5.2）：目标文本与原文相同、模型为空。 */
+  const addEntry = useCallback(
+    async (text: string, sourceLang: Lang, targetLang: Lang): Promise<void> => {
+      if (collectionId === null) {
+        return;
+      }
+      try {
+        await requestJson('/api/entries', {
+          method: 'POST',
+          body: {
+            collection_id: collectionId,
+            text,
+            source_lang: sourceLang,
+            target_lang: targetLang,
+          },
+        });
+        setPageState(1);
+        await load(collectionId, 1, pageSizeRef.current);
+      } catch (err) {
+        onErrorRef.current(errorMessage(err));
+      }
+    },
+    [collectionId, load],
+  );
+
   const batchDelete = useCallback(
     async (ids: string[]): Promise<void> => {
       if (ids.length === 0) {
@@ -191,6 +217,7 @@ export function useEntries(
     setPage,
     setPageSize,
     refresh,
+    addEntry,
     deleteEntry,
     batchDelete,
     clearCollection,

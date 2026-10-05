@@ -52,8 +52,13 @@ export const config = {
   lmstudioBaseUrl: str('LMSTUDIO_BASE_URL', 'http://127.0.0.1:1234').replace(/\/+$/, ''),
   /** 覆盖 lmstudio.exe 路径（§6.2 优先级 1）。 */
   lmstudioExe: str('LMSTUDIO_EXE', ''),
-  /** 指定 model id；空则取 `/v1/models` 首个（§7.1）。 */
-  lmstudioModel: str('LMSTUDIO_MODEL', ''),
+  /**
+   * 本项目固定使用的 model id（DESIGN.md §11 / §6.4，2026-10-05 锁定）。
+   *
+   * 加载、预热与卸载都以它为准：换模型改这一处即可。此前默认为空，改为取
+   * `/v1/models` 首个，结果依赖 LM Studio 的列表顺序——那不是我们指定的选择。
+   */
+  lmstudioModel: str('LMSTUDIO_MODEL', 'hy-mt2-30b-a3b-uncensored-v1-apex'),
   /**
    * 启动探测总超时（§6.1）。实测结论（§13 第 5 条）：`/v1/models` 只表示服务器
    * 就绪，模型冷加载发生在首次推理，故默认从设计稿的 60s 调整为 120s 以便
@@ -76,6 +81,14 @@ export const config = {
   lmstudioStartArgs: str('LMSTUDIO_START_ARGS', 'server start')
     .split(/\s+/)
     .filter((part) => part.length > 0),
+
+  /**
+   * `lms unload` 子进程超时（§6.4）。实测卸载 30B 模型约 2.4s，这里留足余量。
+   * 超时按"完全不碰"降级处理，绝不阻塞停机流程。
+   */
+  lmstudioUnloadTimeoutMs: int('LMSTUDIO_UNLOAD_TIMEOUT_MS', 15_000, 1_000),
+  /** `lms ps --json` 子进程超时（§6.4 的卸载复核），实测约 0.3s。 */
+  lmstudioListTimeoutMs: int('LMSTUDIO_LIST_TIMEOUT_MS', 10_000, 1_000),
 
   /** 单次翻译原文最大字符数（§5.3）。 */
   translateMaxChars: int('TRANSLATE_MAX_CHARS', 10_000, 1),

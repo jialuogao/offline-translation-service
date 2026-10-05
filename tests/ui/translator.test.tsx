@@ -32,6 +32,8 @@ function render(container: HTMLElement, options: RenderOptions = {}): Root {
         onDirectionChange={() => undefined}
         onTranslate={() => undefined}
         onCancel={() => undefined}
+        onClearSource={() => undefined}
+        onSaveDirect={() => undefined}
         translating={options.outputStreaming ?? false}
         disabled={false}
         maxChars={10000}
@@ -83,8 +85,8 @@ describe('译文输出框', () => {
 
     expect(output(container)?.value).toBe('The local');
     expect(container.textContent).toContain('输出中');
-    // 流式期间不允许清空，避免把正在增长的内容清掉。
-    const clearButton = Array.from(container.querySelectorAll('button')).find(
+    // 流式期间不允许清空输出框，避免把正在增长的内容清掉。
+    const clearButton = Array.from(container.querySelectorAll<HTMLButtonElement>('.output-actions button')).find(
       (button) => button.textContent === '清空',
     );
     expect(clearButton?.disabled).toBe(true);
@@ -126,6 +128,8 @@ describe('译文输出框', () => {
           onDirectionChange={() => undefined}
           onTranslate={() => undefined}
           onCancel={() => undefined}
+          onClearSource={() => undefined}
+          onSaveDirect={() => undefined}
           translating={false}
           disabled={false}
           maxChars={10000}
@@ -138,7 +142,7 @@ describe('译文输出框', () => {
       );
     });
 
-    const clearButton = Array.from(container.querySelectorAll('button')).find(
+    const clearButton = Array.from(container.querySelectorAll<HTMLButtonElement>('.output-actions button')).find(
       (button) => button.textContent === '清空',
     );
     act(() => {
@@ -153,9 +157,90 @@ describe('译文输出框', () => {
     const container = document.createElement('div');
     const root = render(container);
 
-    const buttons = Array.from(container.querySelectorAll('.output-actions button'));
+    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('.output-actions button'));
     expect(buttons).toHaveLength(2);
     expect(buttons.every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
+
+    act(() => root.unmount());
+  });
+
+  it('原文清空按钮触发 onClearSource', () => {
+    const container = document.createElement('div');
+    const onClearSource = vi.fn();
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <Translator
+          sourceText="要清空的原文"
+          sourceLang="zh"
+          targetLang="en"
+          onSourceTextChange={() => undefined}
+          onDirectionChange={() => undefined}
+          onTranslate={() => undefined}
+          onCancel={() => undefined}
+          onClearSource={onClearSource}
+          onSaveDirect={() => undefined}
+          translating={false}
+          disabled={false}
+          maxChars={10000}
+          outputText=""
+          outputStreaming={false}
+          outputSaved={false}
+          outputModelId={null}
+          onClearOutput={() => undefined}
+        />,
+      );
+    });
+
+    const clearButton = Array.from(container.querySelectorAll('.translator-buttons button')).find(
+      (button) => button.textContent === '清空',
+    );
+    expect(clearButton).toBeDefined();
+    act(() => {
+      clearButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onClearSource).toHaveBeenCalledTimes(1);
+
+    act(() => root.unmount());
+  });
+
+  it('直接存历史按钮触发 onSaveDirect，空原文时禁用', () => {
+    const container = document.createElement('div');
+    const onSaveDirect = vi.fn();
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <Translator
+          sourceText="无需翻译的注释"
+          sourceLang="zh"
+          targetLang="en"
+          onSourceTextChange={() => undefined}
+          onDirectionChange={() => undefined}
+          onTranslate={() => undefined}
+          onCancel={() => undefined}
+          onClearSource={() => undefined}
+          onSaveDirect={onSaveDirect}
+          translating={false}
+          disabled={false}
+          maxChars={10000}
+          outputText=""
+          outputStreaming={false}
+          outputSaved={false}
+          outputModelId={null}
+          onClearOutput={() => undefined}
+        />,
+      );
+    });
+
+    const saveButton = Array.from(container.querySelectorAll('.translator-buttons button')).find(
+      (button) => button.textContent === '直接存历史',
+    );
+    expect(saveButton).toBeDefined();
+    expect((saveButton as HTMLButtonElement).disabled).toBe(false);
+    act(() => {
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onSaveDirect).toHaveBeenCalledTimes(1);
 
     act(() => root.unmount());
   });

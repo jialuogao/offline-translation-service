@@ -29,12 +29,24 @@ scatter prompt strings elsewhere.
 | Concurrent stream cap reached | 409 | `TRANSLATION_IN_FLIGHT` |
 | Collection or entry missing | 404 | `COLLECTION_NOT_FOUND` / `ENTRY_NOT_FOUND` |
 | Unknown `/api` path | 404 | `NOT_FOUND` |
-| LM Studio not started by this session, no `force` | 409 | `LMSTUDIO_NOT_OWNED` |
 | Anything unexpected | 500 | `INTERNAL_ERROR` |
+
+`LMSTUDIO_NOT_OWNED` is gone: it belonged to the old ownership-gated LM Studio shutdown,
+which `DESIGN.md` §6.4 removed. Unload failures are **not** errors — `POST
+/api/lmstudio/unload` answers HTTP 200 with `{ ok: false, reason }`, because a model that
+stays resident is a business outcome the caller must explain, not a request failure.
 
 **`TRANSLATION_IN_FLIGHT` is a 409, not a 400** — `assertNotInFlight` uses
 `conflict()`. It is thrown before any SSE header is written, so the client receives
 ordinary JSON and can display `message`.
+
+`routes/entries.ts` also owns `POST /api/entries`, which **saves an entry without any
+translation** (`DESIGN.md` §5.2): it validates `collection_id` / `text` / both language
+fields, then calls `CollectionService.insertEntry` with `source_text = target_text = text`
+and `model_id = null`. There is no in-flight guard or LM Studio involvement on this path;
+it exists so the UI can record a note verbatim. The route ordering note below is about the
+SSE router; `POST /entries` and `POST /entries/batch-delete` are distinct paths and do not
+conflict.
 
 Route ordering matters: validation runs first, then `assertNotInFlight`, then the stream
 limit, then the SSE headers. Reordering these turns a clean JSON error into a

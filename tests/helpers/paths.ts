@@ -17,6 +17,24 @@ export function scratchDir(...segments: string[]): string {
 }
 
 /**
+ * 删除某个 scratch SQLite 文件及其 WAL/SHM 边车文件。
+ *
+ * **每个测试都要在结束时调用它。** `scratchDir()` 只建目录、不做任何清理，
+ * 忘记删的话 `.temp/tests/` 会随每次 `pnpm test` 无限累积。
+ * （`tests/server/` 之所以是干净的，就是因为 `context.ts#close()` 调了它。）
+ */
+export function removeDbFiles(dbPath: string): void {
+  for (const suffix of ['', '-wal', '-shm']) {
+    const target = `${dbPath}${suffix}`;
+    try {
+      if (fs.existsSync(target)) fs.rmSync(target, { force: true });
+    } catch {
+      /* scratch 清理失败不应影响断言结果 */
+    }
+  }
+}
+
+/**
  * 在**安全端口区间**内监听，返回真实端口。
  *
  * 不要用 `server.listen(0)`：Windows 分配的临时端口可能落到 Node `fetch` 拒绝连接的

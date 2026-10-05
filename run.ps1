@@ -167,6 +167,9 @@ try {
 Write-Ok "端口 $Port 可用"
 
 # ---------------------------------------------------------------- 4. LM Studio
+# 只做探测与报告，不负责启动：LM Studio 的启动归后端所有
+# （DESIGN.md §6.3/§6.4，2026-10-05 决定）。后端在端点不可达时会自行执行
+# `lms server start`，该命令对冷机器同样有效，因此这里不重复启动。
 Write-Step '检查 LM Studio（http://127.0.0.1:1234）'
 $lmReady = $false
 try {
@@ -189,28 +192,10 @@ if ($lmReady) {
   } else {
     Write-Warn2 '服务在运行，但当前没有已加载的模型；首次翻译会自动加载（可能较慢）'
   }
+  Write-Note '关闭服务时只会卸载模型以释放内存，LM Studio 服务器会继续运行'
 } else {
-  Write-Warn2 '未检测到 LM Studio 本地服务器'
-  $lms = Join-Path $env:USERPROFILE '.lmstudio\bin\lms.exe'
-  if (Test-Path $lms) {
-    Write-Note '尝试自动启动：lms server start'
-    try {
-      & $lms server start | Out-Null
-      for ($i = 0; $i -lt 20; $i++) {
-        Start-Sleep -Milliseconds 500
-        try {
-          $probe = Invoke-WebRequest -Uri 'http://127.0.0.1:1234/v1/models' -UseBasicParsing -TimeoutSec 2
-          if ($probe.StatusCode -eq 200) { $lmReady = $true; break }
-        } catch { }
-      }
-    } catch { }
-  }
-  if ($lmReady) {
-    Write-Ok 'LM Studio 已启动'
-  } else {
-    Write-Warn2 '服务仍会启动，但翻译会返回 LMSTUDIO_UNAVAILABLE'
-    Write-Note '请在 LM Studio 里打开本地服务器并加载翻译模型，然后在界面上点"重试"'
-  }
+  Write-Warn2 '未检测到 LM Studio 本地服务器；后端启动时会自动拉起它'
+  Write-Note '若长时间仍未就绪，请在 LM Studio 里打开本地服务器，并在界面上点"重试"'
 }
 
 # ---------------------------------------------------------------- 5. 启动后端

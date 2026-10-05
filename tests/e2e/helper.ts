@@ -132,6 +132,9 @@ export async function createE2EContext(): Promise<E2EContext> {
     exeOverride: '',
     startArgs: [],
     locate: () => null,
+    modelId: E2E_MODEL,
+    unloadTimeoutMs: 60_000,
+    listTimeoutMs: 30_000,
     log: () => {
       /* 静音 */
     },

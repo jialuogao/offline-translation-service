@@ -105,31 +105,48 @@
 1. 初始化 DB（建表/迁移）。
 2. `LMStudioProcessManager.startup()`：
    1. 探测 `http://127.0.0.1:1234/v1/models`（带超时，最多重试 N 次）。
-   2. 若可达：`sessionStartedByUs = false`，直接使用。
-   3. 若不可达：定位 `lmstudio.exe`（见 §6.2），`spawn` 启动，记录子进程 PID；轮询 `/v1/models` 直到就绪或超时。
-   4. 记录 `sessionStartedByUs` 与 PID，供关闭时决策。
+   2. 若可达：直接使用，不做任何启动动作。
+   3. 若不可达：定位可执行文件（见 §6.2）；**只有 `lms` CLI 会被 spawn**
+      （桌面版没有 `server start`/`unload` 子命令，定位到它即放弃启动）。
+      spawn 前补 `-p <LMSTUDIO_BASE_URL 的端口>` 与 `--bind 127.0.0.1`（见 §6.3）。
+   4. 轮询 `/v1/models` 直到就绪或超时；超时则继续启动服务，翻译返回
+      `LMSTUDIO_UNAVAILABLE`。
 3. 启动 HTTP 服务，托管前端。
+
+> 启动路径**不再记录归属或 PID**：§6.4 已取消一切基于归属的关闭决策，而
+> `lms server start` 是短命 CLI，其 PID 随即失效。
 
 ### 3.4 关闭流程
 
-关闭分两类场景，行为不同：
+> **已锁定的决策（2026-10-05，用户确认，取代本节原有内容）**：关闭服务的目标是
+> **释放模型驻留的显存/内存**，**不是终止 LM Studio 进程**。
+>
+> - 服务关闭时**一律不终止 LM Studio 进程**，也**不执行 `lms server stop`**。
+> - 本地服务器可以一直保持运行；只要没有模型驻留，机器上就没有显著常驻开销。
+> - 关闭时唯一要做的 LM Studio 相关动作是**卸载已驻留模型**。
+> - 无法可靠卸载时按"完全不碰"降级：不做任何进程终止手段，详见 §6.4。
 
-**A. 用户经前端主动"关闭服务"**（推荐路径，可触达用户）：
+**A. 用户经前端主动"关闭服务"**（推荐路径）：
 
-1. 前端先调 `GET /api/lmstudio/status` 取 `startedByUs`。
-2. `startedByUs === true`：直接调 `POST /api/shutdown`，后端 kill LM Studio（按 PID）→ 关 DB → 退出，前端不必弹窗。
-3. `startedByUs === false`：前端弹窗"是否同时关闭 LM Studio？"。
-   - 用户选"是"：调 `POST /api/shutdown` 带 `{ closeLmStudio: true }`，后端按端口关联 PID 尽力终止 LM Studio（允许失败）→ 关 DB → 退出。
-   - 用户选"否"：调 `POST /api/shutdown` 带 `{ closeLmStudio: false }`，LM Studio 保持运行，后端关 DB 退出。
+1. 前端调 `POST /api/shutdown`。
+2. 后端卸载本项目使用的模型（`lms unload <LMSTUDIO_MODEL>`，见 §6.4）→ 停止接受新连接 → 关 DB → 退出。
+3. **不再弹窗询问"是否同时关闭 LM Studio"**——服务器本就保持运行，没有可选项。
 
-**B. 后端直接收到 SIGINT/SIGTERM（用户 Ctrl-C、关终端、kill 进程）**：
+**B. 后端收到 SIGINT/SIGTERM**（用户在后端窗口按 Ctrl+C）：
 
 - 不询问（无法触达用户）。
-- `startedByUs === true`：kill LM Studio（按 PID）。
-- `startedByUs === false`：跳过 LM Studio，关 DB 退出。
-- 前端通过轮询 `/api/lmstudio/status` 感知服务已断开（连接被拒）。
+- 执行与 A 相同的"卸载模型 → 关 DB"流程；退出码 130（SIGINT）/ 143（SIGTERM）。
 
-> 设计意图：只有用户主动关闭时才有"询问外部 LM Studio"的交互；信号路径无法可靠完成 HTTP 往返，故按归属直接决策。`startedByUs === false` 下不自动关外部进程，是 §6.4 的硬约束，本流程不违背。
+**C. 直接关闭后端控制台窗口（点标题栏 X）**：
+
+- 点 X **不会**送达可捕获信号（`CTRL_CLOSE_EVENT` 在 Node 中无对应处理器），
+  卸载与关库**都不会执行**，模型将继续驻留。
+- **已知且接受，不做处理**（2026-10-05 用户确认）：`run.ps1` 的停止提示仍写
+  "关闭该窗口或按 Ctrl+C"，该路径会绕过本节全部动作。
+- 兜底是 LM Studio 自带的空闲自动卸载（`lms ps` 的 `TTL` 列实测约 1 小时倒计时），
+  因此最坏情况是模型多驻留至多约 1 小时。
+
+前端通过轮询 `/api/lmstudio/status` 感知服务已断开（连接被拒）。
 
 ---
 
@@ -196,6 +213,7 @@ SQLite 单文件 `data/translations.db`。时间戳存为 ISO 8601 字符串（U
 | 方法 | 路径 | 说明 | 请求参数 | 响应 |
 | --- | --- | --- | --- | --- |
 | GET | `/api/collections/:id/entries` | 列条目（created_at desc） | query: `?page=1&pageSize=50` | `{ items: Entry[], total: number, page, pageSize }` |
+| POST | `/api/entries` | 不翻译直接写库（记录无需翻译的注释/中间信息） | `{ collection_id, text, source_lang, target_lang }` | `201 { entry }` |
 | DELETE | `/api/entries/:id` | 删单条 | — | `204` |
 | POST | `/api/entries/batch-delete` | 批量删 | `{ ids: string[] }` | `{ deleted: number }` |
 | DELETE | `/api/collections/:id/entries` | 清空合集（保留合集本身） | — | `{ deleted: number }` |
@@ -204,6 +222,7 @@ SQLite 单文件 `data/translations.db`。时间戳存为 ISO 8601 字符串（U
 
 - `pageSize` 默认 50、上限 200；非法值回退默认（不在候选集内的一律按默认处理）。
 - 前端把每页条数作为界面偏好暴露（20 / 50 / 100 / 200），改动后回到第一页并记住选择（见 §9.5）。
+- `POST /api/entries` 不做翻译：`source_text`/`target_text` 都写入 `text` 原样、`model_id` 为 `null`，方向随请求给定（前端用当前选择的方向）。适合记录无需翻译的中文注释或中间信息。
 
 ### 5.3 翻译（流式）
 
@@ -254,16 +273,24 @@ data: {"error": "LMSTUDIO_UNAVAILABLE", "message": "无法连接 LM Studio"}
 
 | 方法 | 路径 | 说明 | 请求体 | 响应 |
 | --- | --- | --- | --- | --- |
-| GET | `/api/lmstudio/status` | 探测状态 | — | `{ running: boolean, startedByUs: boolean, modelLoaded?: string, pid?: number }` |
+| GET | `/api/lmstudio/status` | 探测状态 | — | `{ running: boolean, modelLoaded?: string }` |
 | GET | `/api/lmstudio/models` | 列已加载模型 | — | `{ models: string[] }` |
-| POST | `/api/lmstudio/shutdown` | **仅关闭 LM Studio**（不关后端），用于用户想释放 GPU 内存但继续浏览历史 | — | `{ ok: boolean }`（若非本会话启动则返回 409，前端据此弹窗；确认后带 `{ force: true }` 重试，按端口关联 PID 尽力终止） |
-| POST | `/api/shutdown` | **关闭整个服务**（含 LM Studio 处理） | `{ closeLmStudio?: boolean }` | `{ ok: boolean }` 后随即进程退出 |
+| POST | `/api/lmstudio/unload` | **卸载模型**（不关后端、不关 LM Studio 服务器），用于释放内存而继续浏览历史 | — | `{ ok: boolean, unloaded: string[], residual?: string[], reason?: string }` |
+| POST | `/api/shutdown` | **关闭整个服务**（先卸载模型，再停止接受新连接，再关 DB） | — | `{ ok: boolean }` 后随即进程退出 |
 
-端点语义（与 §3.4 配合）：
+端点语义（与 §3.4 / §6.4 配合）：
 
-- `startedByUs` 字段供前端在关闭服务时决定是否弹"是否同时关闭 LM Studio"。
-- `POST /api/shutdown`：`closeLmStudio` 仅在 `startedByUs === false` 时有意义（决定是否尽力关外部 LM Studio）；`startedByUs === true` 时后端无视此参数，始终按 PID 关闭本会话启动的 LM Studio。
-- `POST /api/lmstudio/shutdown` 与 `/api/shutdown` 互不替代：前者只关 LM Studio 且后端继续运行，后者关整个服务。
+- `POST /api/lmstudio/unload` 与 `/api/shutdown` 互不替代：前者只卸载模型、后端继续运行，
+  后者关整个服务。两者执行的是**同一套** LM Studio 动作（卸载），区别只在后续步骤。
+- `unload` 的 `ok: false` 是**业务结果而非服务器错误**，故仍返回 HTTP 200：
+  `residual` 非空表示复核后目标实例仍驻留（内存没有真正释放），`reason` 为中文原因。
+  卸载失败时**不得**回退到任何进程终止手段（§6.4）。
+- `POST /api/shutdown` 的响应**只表示"已受理"**：响应发出后才开始卸载模型（实测约 2.4s）。
+  调用方必须轮询到连接被拒才算真正结束，中途终止进程会把卸载砍掉。仓库根目录的
+  `shutdown.ps1` 就是这个轮询的参考实现。
+- `startedByUs` 与 `pid` 已从 `/api/lmstudio/status` **整体删除**（§6.4 取消了所有基于归属的
+  终止决策）；原 `/api/lmstudio/shutdown` 更名为 `/api/lmstudio/unload`，其 409 与
+  `{ force: true }` 归属确认流程一并删除。
 
 ---
 
@@ -300,25 +327,80 @@ data: {"error": "LMSTUDIO_UNAVAILABLE", "message": "无法连接 LM Studio"}
 
 ### 6.3 启动
 
-- `lms.exe`：`spawn(exePath, ['server', 'start'], { windowsHide: true, detached: false })`
+> **已锁定的决策（2026-10-05，用户确认）**：只启动**本地服务器**，**不启动 LM Studio 桌面应用**（图形界面）。
+> 后端不 spawn 图形版 `LM Studio.exe`，定位到它时仅用于日志与诊断展示。
+>
+> **但本地服务器具备冷启动能力**（本机实测）：桌面应用未运行时，`lms server start` 会以
+> `LM Studio.exe --run-as-service` 拉起一个**无界面的服务实例**并在其上开服务器——
+> 退出码 0、耗时 3346 ms、无 GUI 窗口、`/v1/models` 随后返回 200。
+> 因此后端的 spawn 在冷机器上同样有效，**不需要**用户预先打开 LM Studio。
+
+- `lms.exe`：`spawn(exePath, ['server', 'start', '-p', <port>, '--bind', '127.0.0.1'], { windowsHide: true, detached: false })`
   （本机实测支持，`lms server status` 亦可用）。
-- 桌面版主程序（仅在没有 `lms` CLI 时作为兜底）：直接 `spawn(exePath)`，依赖其"启动时自动开 server"设置。
+  - **`-p` 必须显式传**（2026-10-05 锁定）：不传时 `lms server start` 会**沿用上一次的端口**，
+    未必等于 `LMSTUDIO_BASE_URL` 的端口，会导致探测不到而误报"未检测到"。
+  - **`--bind 127.0.0.1` 必须显式传**：本服务无鉴权（§1.3、AGENTS.md 约定 8），
+    不得让推理端点暴露到局域网。
+- 桌面版主程序：**不再作为启动兜底**，仅在 `locate()` 的结果中保留来源信息供诊断。
 - `windowsHide: true` 默认隐藏 console 窗口；可通过 `LMSTUDIO_SHOW_CONSOLE=true` 显示（调试用）。
-- 记录 `childProcess.pid` 与 `sessionStartedByUs = true`。
+- 记录 `childProcess.pid` 与 `sessionStartedByUs = true`。**注意**：记录 PID 仅供诊断展示——
+  §6.4 已取消一切基于 PID 的终止动作，且实测 `lms server start` 是短命 CLI（见 impl-note），
+  该 PID 在数百毫秒后即失效，不可用于任何进程操作。
 - 监听 `childProcess` exit：若在服务运行期间 LM Studio 被外部关闭，标记 `running=false` 并允许后续重试启动。
 
-### 6.4 关闭归属判定
+### 6.4 模型卸载策略（取代原"关闭归属判定"）
 
-- `sessionStartedByUs === true`：关闭服务（`POST /api/shutdown`）或单独关 LM Studio（`POST /api/lmstudio/shutdown`）时，直接 `taskkill /PID <pid> /T /F`（Windows）。
-- `sessionStartedByUs === false`：
-  - 后端不主动关闭；`GET /api/lmstudio/status` 暴露 `startedByUs` 让前端知情。
-  - 用户经前端触发关闭时（"关闭服务"或"单独关 LM Studio"），前端据 `startedByUs` 决定是否弹窗询问；用户确认后：
-    - 关整个服务：调 `POST /api/shutdown` 带 `{ closeLmStudio: true }`。
-    - 单独关 LM Studio：调 `POST /api/lmstudio/shutdown` 带 `{ force: true }`。
-  - 两种情况下后端都按 `http://127.0.0.1:1234` 关联的 PID 终止；**终止前校验该 PID 的进程名确为 LM Studio，避免误杀占用同端口的其他进程**；失败则静默——已尽力。
-    - 实测：`Get-NetTCPConnection -LocalPort 1234` 在普通用户会话下报"拒绝访问"，因此以 `netstat -ano -p tcp` 为主路径，PowerShell 版本作为兜底。
-    - 进程名校验用 `tasklist /FI "PID eq <pid>" /FO CSV /NH`，映像名或窗口会话名匹配 `LM Studio` 才继续。
-  - 信号路径（SIGINT，§3.4-B）下 `startedByUs === false` 直接跳过，不关外部 LM Studio。
+> **已锁定的决策（2026-10-05，用户确认）**：后端**永不终止 LM Studio 进程**。
+> 原"按记录 PID `taskkill`"与"按端口关联 PID 终止"的整套归属判定逻辑作废。
+
+**总则**
+
+- 关闭服务时唯一要做的 LM Studio 动作是**卸载本项目使用的模型**：`lms unload <identifier>`。
+- **不执行** `lms server stop`，**不执行** `taskkill`，**不按端口查 PID 终止**。
+- 服务器保持运行是**有意的**：停服务器并不释放权重（实测 `lms server stop` 后模型仍以
+  14.23 GB 驻留），而重启它却要付出几十秒冷加载代价。
+- 加载 / 预热（§6.3、`warmup()`）不变；本节只约束关闭方向。
+
+**卸载目标：精确到本项目配置的那一个模型**
+
+- 目标标识取自 `LMSTUDIO_MODEL`（§11），**本项目默认值为
+  `hy-mt2-30b-a3b-uncensored-v1-apex`**，需同时用于 `load` / `warmup()` 与 `unload`。
+- 若该模型存在多实例（LM Studio 会列为 `model`、`model:2`、…），**全部卸载**，不留残余。
+- **不得**连带卸载用户为其它用途加载的模型。
+
+**验收：不能依赖退出码**
+
+`lms unload` **无论成功与否都返回退出码 0**（模型未驻留时打印 `Model Not Found`，退出码仍是 0）。
+因此卸载后必须复核 `lms ps --json`，判据是**目标标识及其 `:N` 变体都不在返回数组中**；
+数组**不必为空**——其它模型仍在列表里属于正常情况。
+
+**降级规则：无法管理 LM Studio 生命周期时"完全不碰"**
+
+以下任一情况发生时，**放弃卸载，不得回退到任何进程终止手段**，只记日志并在界面提示用户手动处理：
+
+- 定位不到 `lms.exe`（仅定位到桌面版 `LM Studio.exe` 时同样放弃——桌面版没有 `server`/`unload` 子命令）。
+- `lms` 子进程执行失败、超时或挂起。**所有 `lms` 调用必须走带超时的子进程**，
+  不得以前台阻塞方式调用（实测 `lms server status` 在服务未运行时可能不返回）。
+
+`lms` 的实测行为与调用约定详见 `docs/impl-notes/lmstudio-lifecycle.md`。
+
+**与旧设计的差异**
+
+| 原设计 | 现设计 |
+|---|---|
+| `sessionStartedByUs === true` → `taskkill /PID <pid> /T /F` | 不终止进程 |
+| `startedByUs === false` → 按端口找 PID、校验进程名、再 `taskkill` | 不终止进程；`startedByUs` 字段**整体删除** |
+| 前端按 `startedByUs` 弹窗询问是否关闭 LM Studio | 不再询问 |
+| `closeLmStudio` 请求参数决定是否终止 | 该参数**删除** |
+| `POST /api/lmstudio/shutdown`（关闭 LM Studio） | `POST /api/lmstudio/unload`（卸载模型） |
+
+> **实现已跟进**（2026-10-05）：`ShutdownController.shutdown()` 的归属分支、
+> `LMStudioProcessManager.shutdown()`、`/api/lmstudio/shutdown` 的 409/`force` 流程
+> 与 `startedByUs`/`pid` 字段均已删除，取而代之的是 `unload()` 与 `lmsCli.ts`。
+> `winProcess.ts` **保留**但已无调用点（见 `AGENTS.md` 的进程安全一节：删除前须询问用户）。
+>
+> §3.4-C 的"点窗口 X 绕过一切"是**已知且接受**的行为：`run.ps1` 的停止提示按用户决定
+> 保持原样，由 LM Studio 的空闲自动卸载兜底。
 
 ### 6.5 不可达时的降级
 
@@ -401,7 +483,7 @@ User：原文原文文本（按段落原样）。
 
 | 用例 | 覆盖 |
 | --- | --- |
-| 启动时 LM Studio 已在跑（Mock 起在前） | `startedByUs=false`，翻译可用 |
+| 启动时 LM Studio 已在跑（Mock 起在前） | 端点可达即直接使用，翻译可用（不再有归属记录） |
 | 启动时 LM Studio 未跑（Mock 不起）+ 之后拉起 | 重试探测逻辑（可注入模拟） |
 | 中→英流式翻译，校验 delta 拼接与 done 落库 | TranslationService + DB |
 | 英→中流式翻译 | 反向方向 |
@@ -409,8 +491,10 @@ User：原文原文文本（按段落原样）。
 | 合集 CRUD + 切换 active | CollectionService |
 | 单条删除 / 批量删除（多选 ids） | batch-delete |
 | 删除 active 合集后自动切到下一个 | active 回退逻辑 |
-| 关闭服务、`startedByUs=true` | 调用关闭（Mock 进程可被 kill） |
-| 关闭服务、`startedByUs=false` | 不自动关，返回 409，前端弹窗路径（接口层断言） |
+| 关闭服务 → 卸载模型 | 卸载目标为 `LMSTUDIO_MODEL` 及其全部 `:N` 实例，其它模型不动 |
+| 卸载后的复核 | `lms unload` 退出码恒为 0，必须用 `lms ps --json` 复核；仍有驻留时 `ok=false` + `residual` |
+| 卸载失败 / `lms` 不可用 / 超时 | 降级：关库并退出，**不终止任何进程**（§6.4） |
+| 多实例残留 | 复核后 `residual` 非空即表示内存没有真正释放 |
 
 > Mock 与测试均置于 `tests/`，与生产代码隔离；`LMSTUDIO_BASE_URL` 指向 Mock 端口即可全链路回归。
 
@@ -421,12 +505,13 @@ User：原文原文文本（按段落原样）。
 ### 9.1 页面结构
 
 - 左栏：合集列表（可新建、切换、重命名、删除）。
-- 右栏：当前合集的翻译区——顶部输入框 + 方向切换 + "翻译"按钮；**输入框正下方是"译文"输出框**（流式实时增长，完成后保留，可复制/清空）；再下方是历史列表。
+- 右栏：当前合集的翻译区——顶部输入框 + 方向切换 + "翻译"按钮；译文输出框（流式实时增长，完成后保留，可复制/清空）；再下方是历史列表。
+- 输入框旁有"清空"（仅清空原文输入，不影响任何记录）与"直接存历史"按钮：后者把当前原文**不翻译**原样写入当前合集（见 §5.2 的 `POST /api/entries`），适合记录无需翻译的注释/中间信息；写库成功后自动清空输入框便于连续记录。
 - 历史列表项：原文 / 译文 / 时间 / 删除勾选框；流式翻译时最新一条实时增长（与输出框是同一份状态的两处展示）。
 
 ### 9.2 多选删除（Shift / Ctrl）
 
-- 列表项前有 checkbox；点行也可选中。
+- 列表项前有 checkbox，**勾选即独立切换该项**（不改动其他行的选择）；点行也可选中。
 - **Ctrl+点击**：切换该项选中态（非连续多选）。
 - **Shift+点击**：从上一个选中项到当前项之间（含两端）全部选中（连续范围选择）。
 - **全选/取消全选**：列表头部的 checkbox 切换当前页全选/取消全选；列表区聚焦时 `Ctrl+A` 等效全选当前页。
@@ -521,9 +606,11 @@ offline-translation-service/
 | `HOST` | `127.0.0.1` | 监听地址；本服务无鉴权，**不得**改成对外地址（§1.3） |
 | `LMSTUDIO_BASE_URL` | `http://127.0.0.1:1234` | 推理端点；测试时指向 Mock |
 | `LMSTUDIO_EXE` | （空，自动定位） | 覆盖 `lms.exe` / `LM Studio.exe` 路径 |
-| `LMSTUDIO_MODEL` | （空，取首个） | 指定 model id |
+| `LMSTUDIO_MODEL` | `hy-mt2-30b-a3b-uncensored-v1-apex` | **本项目固定使用的 model id**（2026-10-05 锁定）。加载 / 预热 / 卸载都以它为准；换模型改这一处即可 |
 | `LMSTUDIO_AUTOSTART` | `true` | 是否允许自动拉起 LM Studio（测试置 `false`） |
 | `LMSTUDIO_START_ARGS` | `server start` | spawn 时使用的参数（实测校准，见 §6.3） |
+| `LMSTUDIO_UNLOAD_TIMEOUT_MS` | `15000` | `lms unload` 子进程超时；超时按"完全不碰"降级，不阻塞停机（§6.4） |
+| `LMSTUDIO_LIST_TIMEOUT_MS` | `10000` | `lms ps --json` 子进程超时（卸载复核用） |
 | `DB_PATH` | `apps/server/data/translations.db` | SQLite 文件 |
 | `LMSTUDIO_STARTUP_TIMEOUT_MS` | `120000` | 启动探测总超时（设计初稿为 60s，实测上调以覆盖冷启动；模型冷加载另见 `LMSTUDIO_WARMUP`） |
 | `LMSTUDIO_PROBE_INTERVAL_MS` | `1000` | 探测初始间隔；超过 10 次后指数退避至 3000ms |
@@ -601,9 +688,10 @@ interface LMStudioAdapter {
 
 // LMStudioProcessManager
 interface LMStudioProcessManager {
-  startup(): Promise<{ running: boolean; startedByUs: boolean; pid?: number }>;
-  shutdown(opts: { force?: boolean }): Promise<{ ok: boolean }>;
-  status(): { running: boolean; startedByUs: boolean; pid?: number };
+  startup(): Promise<{ running: boolean }>;
+  // 卸载 LMSTUDIO_MODEL 及其全部 :N 实例；不终止任何进程（§6.4）。
+  unload(): Promise<{ ok: boolean; unloaded: string[]; residual: string[]; reason?: string }>;
+  probeStatus(): Promise<LmStudioStatus>;
 }
 
 // CollectionService

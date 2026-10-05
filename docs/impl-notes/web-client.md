@@ -42,7 +42,7 @@ implementation detail:
 
 | Gesture | Result |
 |---|---|
-| Checkbox click | Selects only that row and moves the anchor; clicking an already-selected row's checkbox deselects it |
+| Checkbox click | **Toggles just that row** (`toggleKeepAnchor`): an unchecked row is added to the selection without touching other rows, a checked row is removed; the anchor moves to that row. Multi-select by ticking several boxes works this way. |
 | Plain row click | Anchor moves to that row; only that row is selected |
 | Ctrl/Cmd + click | Toggles just that row (non-contiguous selection); the anchor moves there |
 | Shift + click | Adds the inclusive range from the anchor to the clicked row; the anchor is preserved; falls back to single-select when no anchor exists |
@@ -62,6 +62,12 @@ Supporting rules:
 
 `useMultiSelect` keeps `anchorIndex` (an index into the current page), not a row id,
 because Shift ranges are page-relative.
+
+**Checkbox multi-select regression:** the checkbox must call `toggleKeepAnchor`, not
+`selectOnly`. Treating a checkbox click as a plain click made selecting a second row
+reset the whole selection, so multi-select by ticking boxes was impossible. Covered by
+`tests/ui/multiselect.test.tsx` (two checkboxes → 已选 2 条; Ctrl+click toggles;
+Shift+click ranges; header select-all).
 
 ## UI preferences (remembered settings)
 
@@ -146,6 +152,11 @@ forgotten; clicking a collection writes the memory) and `tests/ui/preferences.te
   translation is read.** During streaming it shows the accumulated deltas; after `done`
   it keeps the final text and adds a 已保存到历史 badge plus the model id. It has 复制 /
   清空 actions; 清空 only clears the box and never touches history.
+  - **The box auto-grows with its content.** On every `text` change an effect sets the
+    textarea height to its `scrollHeight` (reset to `auto` first, so it shrinks back to
+    `min-height` when cleared). The CSS has **no `max-height` cap** and `overflow: hidden`
+    — a long translation stretches the box instead of scrolling internally, and 清空
+    returns it to the minimum height. `resize: vertical` is kept for manual adjustment.
 - The streaming row in the history list still exists (newest row, grows as deltas
   arrive), so the same translation is visible in two places by design: the box for
   reading/copying, the history row for the record.
@@ -153,6 +164,24 @@ forgotten; clicking a collection writes the memory) and `tests/ui/preferences.te
   output box so the user can see what arrived.
 - Whitespace-only input is a no-op. `TRANSLATE_MAX_CHARS` is mirrored client-side for
   instant feedback only; the server is authoritative.
+
+### Saving an entry without translating (直接存历史)
+
+The source-input footer has two actions beyond 翻译 / 取消翻译:
+
+- **清空** clears the source textarea only; it never touches history. Disabled when the
+  input is empty.
+- **直接存历史** posts the input verbatim to `POST /api/entries` (no LM Studio involved)
+  and, on success, clears the input for fast consecutive notes. `App` keeps this as a
+  separate `handleSaveDirect` calling `useEntries.addEntry(text, sourceLang, targetLang)`,
+  then reloads collection counts. It is disabled while a translation is in flight, when
+  the input is empty/over-limit, or when the service is down.
+
+The backend writes `source_text = target_text = text` with `model_id = null`, so a note
+appears identically in both history columns (contract: `DESIGN.md` §5.2). Covered by
+`tests/ui/translator.test.tsx` (清空 triggers `onClearSource`; 直接存历史 triggers
+`onSaveDirect`, disabled when empty) and `tests/server/api.test.ts`
+(`POST /api/entries` writes the row and 400s on empty text / bad direction).
 
 ### `useTranslator` state contract
 
@@ -177,18 +206,27 @@ actions when empty, 输出中 vs 已保存到历史 states).
 
 ## Lifecycle UI
 
-`StatusBar` shows 运行中 / 未就绪, `startedByUs`, the loaded model and the PID, with
-刷新 and 重试 actions.
+`StatusBar` shows 运行中 / 未就绪, the loaded model, with 刷新 and 重试 actions.
+It has exactly two actions, neither of which is conditional:
 
-- **关闭服务** first reads `/api/lmstudio/status`. `startedByUs === true` →
-  `POST /api/shutdown` with no prompt. `startedByUs === false` → a dialog asking
-  是否同时关闭 LM Studio, then `POST /api/shutdown` with `{ closeLmStudio: true | false }`
-  (the dialog also offers 仅关闭服务).
-- **仅关闭 LM Studio** posts to `/api/lmstudio/shutdown`; on 409 `LMSTUDIO_NOT_OWNED` it
-  asks for confirmation and retries with `{ force: true }`.
-- After a successful shutdown the UI switches to a 服务已关闭 banner, disables controls
-  and stops polling; there is no way to restart the backend from the page. A network
-  failure on any request is treated the same way (backend presumed gone).
+- **卸载模型** posts to `/api/lmstudio/unload` and reports the outcome verbatim in a
+  banner. `ok: false` is a business result, not an error, so it is rendered as an
+  explanation (typically: unload failed, the model is still resident, unload it by hand
+  or wait for LM Studio's idle timeout) rather than as a failure toast. The button
+  covers its own wait with 正在卸载…, because the call takes a couple of seconds.
+- **关闭服务** posts to `/api/shutdown`. There is **no confirmation dialog**: since
+  §6.4 the server always stays up, so there is no longer a question worth asking. The
+  shutdown unloads the model on the way out.
+
+Both actions share `busyAction` with 刷新, so they cannot overlap. After a successful
+shutdown the UI switches to a 服务已关闭 banner, disables controls and stops polling;
+there is no way to restart the backend from the page. A network failure on any request
+is treated the same way (backend presumed gone) — which is also what makes the shutdown
+look instantaneous even though the model unload still finishes server-side.
+
+`useLmStudioStatus` exposes `unloadModel()` (returning `{ ok, message }` so the caller can
+show the reason verbatim) and `shutdownService()` with no arguments, since the
+`closeLmStudio` parameter no longer exists.
 
 ## Build integration
 

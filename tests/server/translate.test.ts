@@ -366,16 +366,17 @@ describe('§9.4 客户端断开', () => {
 });
 
 describe('§5.4 LM Studio 状态与模型列表', () => {
-  it('status 反映 running，且非本会话启动时 startedByUs=false', async () => {
-    const status = await api<{ running: boolean; startedByUs: boolean; modelLoaded?: string }>(
+  it('status 反映 running 与已加载模型（startedByUs 已于 §6.4 重新决定后删除）', async () => {
+    const status = await api<{ running: boolean; modelLoaded?: string; startedByUs?: boolean }>(
       ctx.baseUrl,
       'GET',
       '/api/lmstudio/status',
     );
     expect(status.status).toBe(200);
     expect(status.body.running).toBe(true);
-    expect(status.body.startedByUs).toBe(false);
     expect(status.body.modelLoaded).toBe('mock-hy-mt2-30b-a3b');
+    // 归属字段已从契约中移除，响应里不应再出现。
+    expect(status.body).not.toHaveProperty('startedByUs');
   });
 
   it('models 返回 Mock 的模型 id', async () => {

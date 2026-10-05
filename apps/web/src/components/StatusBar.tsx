@@ -9,7 +9,7 @@ export interface StatusBarProps {
   serviceDown: boolean;
   busyAction: string | null;
   onRefresh: () => void;
-  onShutdownLmStudio: () => void;
+  onUnloadModel: () => void;
   onShutdownService: () => void;
 }
 
@@ -20,7 +20,7 @@ export function StatusBar({
   serviceDown,
   busyAction,
   onRefresh,
-  onShutdownLmStudio,
+  onUnloadModel,
   onShutdownService,
 }: StatusBarProps): JSX.Element {
   let stateClass = 'status-dot unknown';
@@ -45,11 +45,9 @@ export function StatusBar({
         <span className="status-text">LM Studio：{stateText}</span>
         {status !== null && status.running ? (
           <span className="muted">
-            {status.startedByUs ? '由本服务启动' : '外部实例'}
             {status.modelLoaded !== undefined && status.modelLoaded !== ''
-              ? ` · 模型 ${status.modelLoaded}`
-              : ''}
-            {status.pid !== undefined ? ` · PID ${status.pid}` : ''}
+              ? `模型 ${status.modelLoaded}`
+              : '未加载模型'}
           </span>
         ) : null}
         {loading ? <span className="muted">正在检测…</span> : null}
@@ -75,10 +73,11 @@ export function StatusBar({
         <button
           type="button"
           className="btn btn-mini"
-          onClick={onShutdownLmStudio}
+          onClick={onUnloadModel}
           disabled={busyAction !== null || serviceDown}
+          title="卸载已驻留模型以释放内存；本地服务器继续运行"
         >
-          {busyAction === 'lmstudio' ? '正在关闭…' : '仅关闭 LM Studio'}
+          {busyAction === 'lmstudio' ? '正在卸载…' : '卸载模型'}
         </button>
         <button
           type="button"

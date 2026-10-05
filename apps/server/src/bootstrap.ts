@@ -59,15 +59,16 @@ export async function startService(
     autoStart: config.lmstudioAutoStart,
     exeOverride: config.lmstudioExe,
     startArgs: config.lmstudioStartArgs,
+    modelId: config.lmstudioModel,
+    unloadTimeoutMs: config.lmstudioUnloadTimeoutMs,
+    listTimeoutMs: config.lmstudioListTimeoutMs,
     log: (message) => logger(message),
   });
 
   if (overrides.skipLmStudioStartup !== true) {
     const startup = await processManager.startup();
     if (startup.running) {
-      logger(
-        `LM Studio 就绪（startedByUs=${startup.startedByUs}${startup.pid === undefined ? '' : `, pid=${startup.pid}`}）`,
-      );
+      logger('LM Studio 就绪');
       if (config.lmstudioWarmup) {
         // 不阻塞 HTTP 启动：30B 模型冷加载可能数十秒，先把界面放出去。
         void processManager
@@ -126,6 +127,10 @@ export async function startService(
   const address = server.address();
   const port = typeof address === 'object' && address !== null ? address.port : config.port;
   logger(`HTTP 服务已启动：http://${config.host}:${port}`);
+
+  // 停机时用它停止接受新连接（§3.4）：app 必须先建好才能 listen，
+  // 而停机控制器又是 app 的依赖，因此在此回填。
+  shutdown.attachServer(server);
 
   return { server, shutdown, collections, processManager, port };
 }

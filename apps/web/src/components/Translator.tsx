@@ -12,6 +12,10 @@ export interface TranslatorProps {
   onDirectionChange: (sourceLang: Lang, targetLang: Lang) => void;
   onTranslate: () => void;
   onCancel: () => void;
+  /** 清空原文输入框（不影响任何记录）。 */
+  onClearSource: () => void;
+  /** 不翻译直接写库：把当前原文按原样存入历史。 */
+  onSaveDirect: () => void;
   translating: boolean;
   /** 未选合集、服务已关闭等情况下整体禁用。 */
   disabled: boolean;
@@ -36,6 +40,8 @@ export function Translator({
   onDirectionChange,
   onTranslate,
   onCancel,
+  onClearSource,
+  onSaveDirect,
   translating,
   disabled,
   maxChars,
@@ -102,6 +108,24 @@ export function Translator({
         </span>
         {tooLong ? <span className="error-text">原文超过长度上限，请缩短后再翻译</span> : null}
         <div className="translator-buttons">
+          <button
+            type="button"
+            className="btn btn-mini"
+            onClick={onClearSource}
+            disabled={disabled || sourceText === ''}
+            title="清空原文输入框，不影响任何记录"
+          >
+            清空
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={onSaveDirect}
+            disabled={disabled || translating || sourceText.trim() === '' || tooLong}
+            title="不翻译，把当前原文按原样直接存入当前合集的历史"
+          >
+            直接存历史
+          </button>
           {translating ? (
             <button type="button" className="btn" onClick={onCancel}>
               取消翻译

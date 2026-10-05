@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
@@ -10,7 +9,7 @@ import { LMStudioAdapter } from '../../apps/server/src/lmstudio/adapter.js';
 import { LMStudioProcessManager } from '../../apps/server/src/lmstudio/process.js';
 import { ShutdownController } from '../../apps/server/src/shutdown.js';
 import { createApp } from '../../apps/server/src/http/app.js';
-import { scratchDir, listenOnSafePort } from './paths.js';
+import { scratchDir, listenOnSafePort, removeDbFiles } from './paths.js';
 
 /**
  * 测试装配：在随机端口上起一个完整后端，推理端点指向 Mock。
@@ -44,18 +43,21 @@ export interface ContextOptions {
   /** 默认 false：测试绝不启动真实 LM Studio 进程。 */
   autoStart?: boolean;
   maxConcurrentStreams?: number;
-  /** 注入点：按端口查 PID（测试不真的查询系统）。 */
-  findPid?: () => Promise<number | null>;
-  /** 注入点：进程名校验。 */
-  isLmStudio?: () => Promise<boolean>;
-  /** 注入点：终止进程（测试不真的 taskkill）。 */
-  terminate?: (pid: number) => Promise<boolean>;
   exeOverride?: string;
   /**
-   * 模拟"LM Studio 由本会话启动"：以无害的常驻 node 子进程充当被托管的实例，
-   * 从而让 `startedByUs === true` 的关闭路径可测（绝不动真实 LM Studio）。
+   * 模拟 `lms ps` 报告的驻留实例（§6.4）。测试**绝不**真的执行 `lms`：
+   * 这里用一个内存列表回答 `lms ps --json`，并把 `lms unload <id>` 落实为
+   * 从列表中移除，从而能断言"卸载后确实不再驻留"。
    */
-  spawnOwnedProcess?: boolean;
+  loadedInstances?: string[];
+  /** 卸载目标（§11 `LMSTUDIO_MODEL`）。默认与 config 一致。 */
+  modelId?: string;
+  /** 让 `lms` 调用失败（模拟找不到 CLI / 超时），用于降级路径断言。 */
+  lmsFailure?: 'timeout' | 'spawn-error';
+  /** 模拟"定位不到 lms CLI"：unload() 应降级为什么都不做（§6.4）。 */
+  lmsMissing?: boolean;
+  /** 记录实际发起过的 `lms` 调用，便于断言参数（`-p` / `--bind` 等）。 */
+  lmsCalls?: string[][];
 }
 
 let counter = 0;
@@ -75,37 +77,57 @@ export async function createTestContext(options: ContextOptions): Promise<TestCo
     maxChars: options.maxChars ?? config.translateMaxChars,
     mockHeaders: options.mockHeaders ?? true,
   });
+  const loaded: string[] = [...(options.loadedInstances ?? [])];
   const processManager = new LMStudioProcessManager({
     adapter,
     baseUrl: options.lmStudioBaseUrl,
     startupTimeoutMs: 0,
     probeIntervalMs: 1,
     showConsole: false,
-    autoStart: options.spawnOwnedProcess === true,
+    autoStart: options.autoStart ?? false,
     exeOverride: options.exeOverride ?? '',
     startArgs: [],
-    // 只有在需要模拟"本会话启动"时才允许 spawn；默认拒绝，避免误启真实进程。
-    locate:
-      options.spawnOwnedProcess === true
-        ? () => ({
-            path: process.execPath,
-            kind: 'lms-cli' as const,
-            source: 'test-owned-process',
-            args: ['-e', 'setInterval(() => {}, 1000)'],
-          })
-        : () => null,
-    ...(options.findPid !== undefined ? { findPid: options.findPid } : {}),
-    ...(options.isLmStudio !== undefined ? { isLmStudio: options.isLmStudio } : {}),
-    ...(options.terminate !== undefined ? { terminate: options.terminate } : {}),
+    modelId: options.modelId ?? config.lmstudioModel,
+    unloadTimeoutMs: 1_000,
+    listTimeoutMs: 1_000,
+    // 默认提供一个"可定位"的 lms CLI：`lms` 由下面的内存替身应答，
+    // 因此这里只是让 unload() 能走到卸载分支。设为 true 可测试"找不到 CLI"的降级。
+    locate: options.lmsMissing === true
+      ? () => null
+      : () => ({ path: 'lms.exe', kind: 'lms-cli' as const, source: 'test', args: ['server', 'start'] }),
+    // `lms` 全程由内存替身应答（AGENTS.md：测试绝不触碰真实 LM Studio）。
+    runLms: async (_exe, args) => {
+      options.lmsCalls?.push(args);
+      if (options.lmsFailure === 'timeout') {
+        return { ok: false, code: null, stdout: '', stderr: '', timedOut: true };
+      }
+      if (options.lmsFailure === 'spawn-error') {
+        return { ok: false, code: 1, stdout: '', stderr: 'lms not found', timedOut: false };
+      }
+      if (args[0] === 'ps') {
+        return {
+          ok: true,
+          code: 0,
+          stdout: JSON.stringify(loaded.map((id) => ({ identifier: id }))),
+          stderr: '',
+          timedOut: false,
+        };
+      }
+      if (args[0] === 'unload' && args[1] !== undefined) {
+        // 实测：无论成功与否 `lms unload` 都返回 0；模型不存在时打印 Model Not Found。
+        const index = loaded.indexOf(args[1]);
+        if (index >= 0) loaded.splice(index, 1);
+        return {
+          ok: true,
+          code: 0,
+          stdout: index >= 0 ? `Model "${args[1]}" unloaded.` : 'Model Not Found',
+          stderr: '',
+          timedOut: false,
+        };
+      }
+      return { ok: true, code: 0, stdout: '', stderr: '', timedOut: false };
+    },
   });
-
-  // 需要覆盖 `startedByUs === true` 的关闭路径时，用一个无害的常驻 node 进程
-  // 充当"本会话启动的 LM Studio"（AGENTS.md：测试绝不触碰真实 LM Studio）。
-  // 上游是 Mock，spawn 后拿不到就绪，startup 会因 startupTimeoutMs=0 立即返回，
-  // 但归属（startedByUs/pid）已经记录，这正是关闭路径要断言的状态。
-  if (options.spawnOwnedProcess === true) {
-    await processManager.startup();
-  }
 
   const exitCalls: number[] = [];
   const shutdown = new ShutdownController({
@@ -161,16 +183,8 @@ export async function createTestContext(options: ContextOptions): Promise<TestCo
     shutdown,
     exitCalls,
     close: async () => {
-      // 若测试模拟了"本会话启动的 LM Studio"，收尾时按 PID 结束它。
-      const owned = processManager.status();
-      if (owned.startedByUs && owned.pid !== undefined) {
-        await processManager.shutdown({});
-        try {
-          process.kill(owned.pid);
-        } catch {
-          /* 已退出 */
-        }
-      }
+      // §6.4：停机不再终止任何进程，因此这里无需按 PID 收尾——
+      // 这正是新设计消除的那类风险（旧实现在这里对常驻子进程 process.kill）。
       await new Promise<void>((resolve) => {
         server.closeAllConnections?.();
         server.close(() => resolve());
@@ -179,15 +193,4 @@ export async function createTestContext(options: ContextOptions): Promise<TestCo
       removeDbFiles(dbPath);
     },
   };
-}
-
-function removeDbFiles(dbPath: string): void {
-  for (const suffix of ['', '-wal', '-shm']) {
-    const target = `${dbPath}${suffix}`;
-    try {
-      if (fs.existsSync(target)) fs.rmSync(target, { force: true });
-    } catch {
-      /* scratch 清理失败不应影响断言结果 */
-    }
-  }
 }

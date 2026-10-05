@@ -245,6 +245,66 @@ describe('历史条目', () => {
     expect(response.body.error).toBe('COLLECTION_NOT_FOUND');
   });
 
+  it('§5.2 POST /api/entries 不翻译直接写库', async () => {
+    const collection = (
+      await api<Collection>(ctx.baseUrl, 'POST', '/api/collections', { name: '直接写库' })
+    ).body;
+    const response = await api<{ entry: Entry }>(ctx.baseUrl, 'POST', '/api/entries', {
+      collection_id: collection.id,
+      text: '无需翻译的中文注释',
+      source_lang: 'zh',
+      target_lang: 'en',
+    });
+    expect(response.status).toBe(201);
+    expect(response.body.entry.source_text).toBe('无需翻译的中文注释');
+    // target_text 与原文相同、无模型，表示未翻译直接入库。
+    expect(response.body.entry.target_text).toBe('无需翻译的中文注释');
+    expect(response.body.entry.model_id).toBeNull();
+    expect(response.body.entry.collection_id).toBe(collection.id);
+
+    const page = await api<EntryPage>(
+      ctx.baseUrl,
+      'GET',
+      `/api/collections/${collection.id}/entries`,
+    );
+    expect(page.body.total).toBe(1);
+  });
+
+  it('§5.2 POST /api/entries 空 text 或非法方向返回 400', async () => {
+    const collection = (
+      await api<Collection>(ctx.baseUrl, 'POST', '/api/collections', { name: '非法校验' })
+    ).body;
+    const base = {
+      collection_id: collection.id,
+      source_lang: 'zh',
+      target_lang: 'en',
+    };
+    expect(
+      (await api<{ error: string }>(ctx.baseUrl, 'POST', '/api/entries', { ...base, text: '  ' }))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await api<{ error: string }>(ctx.baseUrl, 'POST', '/api/entries', {
+          ...base,
+          text: '内容',
+          source_lang: 'fr',
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  it('§5.2 POST /api/entries 不存在的合集返回 404', async () => {
+    const response = await api<{ error: string }>(ctx.baseUrl, 'POST', '/api/entries', {
+      collection_id: '不存在',
+      text: '内容',
+      source_lang: 'zh',
+      target_lang: 'en',
+    });
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe('COLLECTION_NOT_FOUND');
+  });
+
   it('§5.2 DELETE /api/entries/:id 返回 204 且条目消失', async () => {
     const { collectionId, ids } = await seed(2);
     const deleted = await api(ctx.baseUrl, 'DELETE', `/api/entries/${ids[0]}`);

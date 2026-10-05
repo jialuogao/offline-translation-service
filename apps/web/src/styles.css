@@ -427,10 +427,10 @@ h2 {
 .output-text {
   width: 100%;
   min-height: 140px;
-  /* 长译文（几千字符）不应把右栏无限撑高，超出后在框内滚动。 */
-  max-height: 40vh;
+  /* 高度由 OutputBox 里的脚本随内容自动拉长（流式期间随增量增高），
+     仅保留垂直手调能力，不做固定上限，避免长译文在框内滚动。 */
   resize: vertical;
-  overflow: auto;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);

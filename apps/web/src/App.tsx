@@ -32,20 +32,6 @@ const MAX_CHARS = 10000;
 /** 翻译方向的合法取值，同时用于偏好校验。 */
 const LANG_VALUES = ['zh', 'en'] as const satisfies readonly Lang[];
 
-/** 带错误码的异常（ApiError 的公共形状），用于识别 409 LMSTUDIO_NOT_OWNED。 */
-interface CodedError {
-  code: string;
-}
-
-function isCodedError(value: unknown): value is CodedError {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'code' in value &&
-    typeof (value as { code: unknown }).code === 'string'
-  );
-}
-
 export function App(): JSX.Element {
   const [sourceText, setSourceText] = useState('');
   // 翻译方向是纯界面偏好，记在 localStorage 里，刷新/重开页面后仍是上次的选择。
@@ -189,6 +175,25 @@ export function App(): JSX.Element {
     );
   }, [collections, entries, sourceLang, sourceText, translator]);
 
+  /**
+   * 不翻译直接写库：把原文按原样存入当前合集的历史（DESIGN.md §5.2 扩展，§9.1）。
+   * 常见场景是记录不需要翻译的中文注释或中间信息。
+   */
+  const handleSaveDirect = useCallback((): void => {
+    const collection = collections.active;
+    const text = sourceText.trim();
+    if (collection === null || translator.translatingFor(collection.id) || text === '') {
+      return;
+    }
+    void entries
+      .addEntry(text, sourceLang, sourceLang === 'zh' ? 'en' : 'zh')
+      .then(() => {
+        // 成功写库后清空输入框，方便连续记录多条。
+        setSourceText('');
+        void collections.reload();
+      });
+  }, [collections, entries, sourceLang, sourceText, translator]);
+
   const handleBatchDelete = useCallback((): void => {
     const ids = Array.from(selection.selectedIds);
     if (ids.length === 0) {
@@ -225,60 +230,28 @@ export function App(): JSX.Element {
     });
   }, [collections.active, entries, selection]);
 
-  const handleShutdownLmStudio = useCallback((): void => {
+  const handleUnloadModel = useCallback((): void => {
     setBusyAction('lmstudio');
     void (async () => {
       try {
-        await lmstudio.shutdownLmStudio(false);
-        setBanner('LM Studio 已关闭。历史记录仍可浏览，需要翻译时请重新启动它。');
+        const outcome = await lmstudio.unloadModel();
+        setBanner(outcome.message);
+        await lmstudio.refresh();
       } catch (err) {
-        if (isCodedError(err) && err.code === 'LMSTUDIO_NOT_OWNED') {
-          setDialog({
-            title: '关闭 LM Studio',
-            message: '该 LM Studio 不是本服务启动的。是否仍要尽力关闭它？',
-            confirmLabel: '仍要关闭',
-            danger: true,
-            busyKey: 'lmstudio-force',
-            action: async () => {
-              await lmstudio.shutdownLmStudio(true);
-              setBanner('已尝试关闭外部 LM Studio。');
-            },
-          });
-        } else {
-          setBanner(errorMessage(err));
-        }
+        setBanner(errorMessage(err));
       } finally {
         setBusyAction(null);
       }
     })();
   }, [lmstudio]);
 
+  // §6.4：服务器保持运行，不再有"是否同时关闭 LM Studio"的归属询问。
+  // 关闭服务会自动卸载本项目使用的模型，用户无需额外确认。
   const handleShutdownService = useCallback((): void => {
     setBusyAction('service');
     void (async () => {
       try {
-        // 关闭前先读一次状态，据此决定是否询问是否同时关闭 LM Studio（§5.4）。
-        await lmstudio.refresh();
-        if (lmstudio.status !== null && !lmstudio.status.startedByUs) {
-          setDialog({
-            title: '关闭服务',
-            message: 'LM Studio 不是本服务启动的，是否同时关闭 LM Studio？',
-            confirmLabel: '同时关闭',
-            busyKey: 'shutdown-with-lmstudio',
-            action: async () => {
-              await lmstudio.shutdownService(true);
-            },
-            secondary: {
-              label: '仅关闭服务',
-              action: async () => {
-                await lmstudio.shutdownService(false);
-              },
-            },
-          });
-          return;
-        }
-        // startedByUs === true 时后端会自行按 PID 关闭 LM Studio，无需询问。
-        await lmstudio.shutdownService(false);
+        await lmstudio.shutdownService();
       } catch (err) {
         setBanner(errorMessage(err));
       } finally {
@@ -322,7 +295,7 @@ export function App(): JSX.Element {
         onRefresh={() => {
           void lmstudio.refresh();
         }}
-        onShutdownLmStudio={handleShutdownLmStudio}
+        onUnloadModel={handleUnloadModel}
         onShutdownService={handleShutdownService}
       />
 
@@ -389,6 +362,10 @@ export function App(): JSX.Element {
             }}
             onTranslate={handleTranslate}
             onCancel={translator.cancel}
+            onClearSource={() => {
+              setSourceText('');
+            }}
+            onSaveDirect={handleSaveDirect}
             translating={translating}
             disabled={disabled}
             maxChars={MAX_CHARS}

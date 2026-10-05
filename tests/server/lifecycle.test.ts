@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { LMStudioProcessManager } from '../../apps/server/src/lmstudio/process.js';
+import { LMStudioProcessManager, serverStartArgs } from '../../apps/server/src/lmstudio/process.js';
 import { build, locateLmStudio } from '../../apps/server/src/lmstudio/locate.js';
+import { instancesOf, parseLoadedIdentifiers } from '../../apps/server/src/lmstudio/lmsCli.js';
 import {
   findPidListeningOnPort,
   isLmStudioProcess,
@@ -13,20 +14,38 @@ import { scratchDir, listenOnSafePort } from '../helpers/paths.js';
 /**
  * LM Studio 生命周期测试（DESIGN.md §6）。
  *
- * 安全红线（AGENTS.md）：测试绝不启动或终止真实的 LM Studio。spawn 用无害的
- * `node -e setInterval` 常驻进程代替，terminate 一律注入替身，绝不出现在测试里
- * 的 taskkill 或按映像名清理。
+ * 安全红线（AGENTS.md）：
+ * - `lms` 全程由内存替身应答，测试**绝不**真的执行 `lms`。
+ * - §6.4 取消了一切进程终止，因此这里也**没有任何** taskkill 或按 PID 清理；
+ *   `winProcess` 的测试只验证**查询**函数。
  */
 
 type ManagerOptions = ConstructorParameters<typeof LMStudioProcessManager>[0];
 
-/** 无害的常驻子进程：用于验证 spawn、PID 记录与归属。 */
-function nodeChild(): { path: string; kind: 'lms-cli'; source: string; args: string[] } {
-  return {
-    path: process.execPath,
-    kind: 'lms-cli',
-    source: 'test',
-    args: ['-e', 'setInterval(() => {}, 1000)'],
+const MODEL = '目标模型';
+
+/** `lms` 的内存替身：回答 `ps --json`，把 `unload <id>` 落实为从列表移除。 */
+function fakeLms(loaded: string[], calls?: string[][]) {
+  return async (_exe: string, args: string[]): Promise<{
+    ok: boolean; code: number; stdout: string; stderr: string; timedOut: boolean;
+  }> => {
+    calls?.push(args);
+    if (args[0] === 'ps') {
+      return {
+        ok: true, code: 0, timedOut: false, stderr: '',
+        stdout: JSON.stringify(loaded.map((id) => ({ identifier: id }))),
+      };
+    }
+    if (args[0] === 'unload' && args[1] !== undefined) {
+      // 实测：退出码恒为 0；模型不存在时输出 Model Not Found，退出码仍是 0。
+      const index = loaded.indexOf(args[1]);
+      if (index >= 0) loaded.splice(index, 1);
+      return {
+        ok: true, code: 0, timedOut: false, stderr: '',
+        stdout: index >= 0 ? `Model "${args[1]}" unloaded.` : 'Model Not Found',
+      };
+    }
+    return { ok: true, code: 0, stdout: '', stderr: '', timedOut: false };
   };
 }
 
@@ -40,6 +59,9 @@ function managerOptions(overrides: Partial<ManagerOptions> = {}): ManagerOptions
     autoStart: true,
     exeOverride: '',
     startArgs: [],
+    modelId: MODEL,
+    unloadTimeoutMs: 1_000,
+    listTimeoutMs: 1_000,
     log: () => {
       /* 静音 */
     },
@@ -47,17 +69,8 @@ function managerOptions(overrides: Partial<ManagerOptions> = {}): ManagerOptions
   };
 }
 
-function killQuietly(pid: number | undefined): void {
-  if (pid === undefined) return;
-  try {
-    process.kill(pid);
-  } catch {
-    /* 已退出 */
-  }
-}
-
 describe('§3.3 启动流程', () => {
-  it('端点已可达时直接使用，startedByUs=false，且不定位可执行文件', async () => {
+  it('端点已可达时直接使用，且不定位可执行文件', async () => {
     const locate = vi.fn(() => null);
     const manager = new LMStudioProcessManager(
       managerOptions({
@@ -65,9 +78,8 @@ describe('§3.3 启动流程', () => {
         locate: locate as unknown as ManagerOptions['locate'],
       }),
     );
-    await expect(manager.startup()).resolves.toEqual({ running: true, startedByUs: false });
+    await expect(manager.startup()).resolves.toEqual({ running: true });
     expect(locate).not.toHaveBeenCalled();
-    expect(manager.status()).toEqual({ running: false, startedByUs: false });
   });
 
   it('禁用自动启动时，不可达也不定位、不启动', async () => {
@@ -79,7 +91,7 @@ describe('§3.3 启动流程', () => {
         locate: locate as unknown as ManagerOptions['locate'],
       }),
     );
-    await expect(manager.startup()).resolves.toEqual({ running: false, startedByUs: false });
+    await expect(manager.startup()).resolves.toEqual({ running: false });
     expect(locate).not.toHaveBeenCalled();
   });
 
@@ -90,142 +102,165 @@ describe('§3.3 启动流程', () => {
         locate: (() => null) as unknown as ManagerOptions['locate'],
       }),
     );
-    await expect(manager.startup()).resolves.toEqual({ running: false, startedByUs: false });
+    await expect(manager.startup()).resolves.toEqual({ running: false });
   });
 
-  it('不可达且定位成功时 spawn，记录 PID 与归属，并能按 PID 关闭', async () => {
-    const adapter = createFakeAdapter({ reachable: false });
-    const terminate = vi.fn(async () => true);
-    const manager = new LMStudioProcessManager(
-      managerOptions({
-        adapter: adapter as unknown as ManagerOptions['adapter'],
-        terminate: terminate as unknown as ManagerOptions['terminate'],
-        startupTimeoutMs: 2_000,
-        probeIntervalMs: 5,
-        locate: (() => nodeChild()) as unknown as ManagerOptions['locate'],
-      }),
-    );
-
-    try {
-      const started = await manager.startup();
-      expect(started.startedByUs).toBe(true);
-      expect(typeof started.pid).toBe('number');
-      expect(manager.status().pid).toBe(started.pid);
-      // 端点始终不可达，故就绪判定为 false，但进程归属已记录。
-      expect(started.running).toBe(false);
-
-      const result = await manager.shutdown({});
-      expect(terminate).toHaveBeenCalledWith(started.pid);
-      expect(result.ok).toBe(true);
-      expect(manager.status().startedByUs).toBe(false);
-    } finally {
-      killQuietly(manager.status().pid);
-    }
-  });
-
-  it('spawn 后就绪（探测转可达）时 running=true', async () => {
-    const adapter = createFakeAdapter({ reachable: false });
-    const manager = new LMStudioProcessManager(
-      managerOptions({
-        adapter: adapter as unknown as ManagerOptions['adapter'],
-        terminate: (async () => true) as unknown as ManagerOptions['terminate'],
-        startupTimeoutMs: 2_000,
-        probeIntervalMs: 10,
-        locate: (() => nodeChild()) as unknown as ManagerOptions['locate'],
-      }),
-    );
-    try {
-      setTimeout(() => adapter.setReachable(true), 40);
-      const started = await manager.startup();
-      expect(started).toEqual({ running: true, startedByUs: true, pid: started.pid });
-      await manager.shutdown({});
-    } finally {
-      killQuietly(manager.status().pid);
-    }
-  });
-});
-
-describe('§6.4 关闭归属判定', () => {
-  it('startedByUs=false 且未 force：拒绝关闭（路由据此返回 409）', async () => {
-    const terminate = vi.fn(async () => true);
-    const manager = new LMStudioProcessManager(
-      managerOptions({
-        terminate: terminate as unknown as ManagerOptions['terminate'],
-      }),
-    );
-    await manager.startup();
-    await expect(manager.shutdown({})).resolves.toEqual({ ok: false, stillReachable: true });
-    expect(terminate).not.toHaveBeenCalled();
-  });
-
-  it('force 时按端口查 PID、校验进程名后再终止', async () => {
-    const terminate = vi.fn(async () => true);
-    const findPid = vi.fn(async () => 4321);
-    const isLmStudio = vi.fn(async () => true);
-    const manager = new LMStudioProcessManager(
-      managerOptions({
-        terminate: terminate as unknown as ManagerOptions['terminate'],
-        findPid: findPid as unknown as ManagerOptions['findPid'],
-        isLmStudio: isLmStudio as unknown as ManagerOptions['isLmStudio'],
-      }),
-    );
-    await manager.startup();
-
-    const result = await manager.shutdown({ force: true });
-    expect(findPid).toHaveBeenCalledWith(1234);
-    expect(isLmStudio).toHaveBeenCalledWith(4321);
-    expect(terminate).toHaveBeenCalledWith(4321);
-    // 端点仍可达 → 已尽力但未成功（§6.4 允许失败）。
-    expect(result).toEqual({ ok: false, stillReachable: true });
-  });
-
-  it('force 但进程名不是 LM Studio 时拒绝终止，避免误杀同端口进程', async () => {
-    const terminate = vi.fn(async () => true);
-    const manager = new LMStudioProcessManager(
-      managerOptions({
-        terminate: terminate as unknown as ManagerOptions['terminate'],
-        findPid: (async () => 4321) as unknown as ManagerOptions['findPid'],
-        isLmStudio: (async () => false) as unknown as ManagerOptions['isLmStudio'],
-      }),
-    );
-    await manager.startup();
-    await expect(manager.shutdown({ force: true })).resolves.toEqual({
-      ok: false,
-      stillReachable: true,
-    });
-    expect(terminate).not.toHaveBeenCalled();
-  });
-
-  it('force 且端口无监听者：视为已关闭', async () => {
-    const terminate = vi.fn(async () => true);
+  it('只定位到桌面版时不 spawn（桌面版没有 lms 子命令，§6.2/§6.3）', async () => {
+    const runLms = vi.fn(fakeLms([]));
     const manager = new LMStudioProcessManager(
       managerOptions({
         adapter: createFakeAdapter({ reachable: false }) as unknown as ManagerOptions['adapter'],
-        terminate: terminate as unknown as ManagerOptions['terminate'],
-        findPid: (async () => null) as unknown as ManagerOptions['findPid'],
+        startupTimeoutMs: 0,
+        locate: (() => ({
+          path: 'C:\\x\\LM Studio.exe', kind: 'desktop' as const, source: 'test', args: [],
+        })) as unknown as ManagerOptions['locate'],
+        runLms: runLms as unknown as ManagerOptions['runLms'],
       }),
     );
-    await manager.startup();
-    await expect(manager.shutdown({ force: true })).resolves.toEqual({
-      ok: true,
-      stillReachable: false,
-    });
-    expect(terminate).not.toHaveBeenCalled();
+    await expect(manager.startup()).resolves.toEqual({ running: false });
+    expect(runLms).not.toHaveBeenCalled();
   });
 
-  it('非默认端口也会被解析出来（baseUrl 决定查询端口）', async () => {
-    const findPid = vi.fn(async () => 5555);
+  it('拼装启动参数时补 -p <端口> 与 --bind 127.0.0.1（§6.3 实测：不传 -p 会沿用上次的端口）', () => {
+    const args = serverStartArgs('http://127.0.0.1:8123', ['server', 'start']);
+    expect(args).toEqual(['server', 'start', '-p', '8123', '--bind', '127.0.0.1']);
+  });
+
+  it('调用方已显式提供 -p / --bind 时不重复追加', () => {
+    const args = serverStartArgs('http://127.0.0.1:8123', ['server', 'start', '-p', '9999']);
+    expect(args.filter((a) => a === '-p')).toHaveLength(1);
+    expect(args[args.indexOf('-p') + 1]).toBe('9999');
+    expect(args.filter((a) => a === '--bind')).toHaveLength(1);
+  });
+
+  it('baseUrl 无法解析端口时不追加 -p，但仍固定 --bind', () => {
+    const args = serverStartArgs('不是 URL', ['server', 'start']);
+    expect(args).toEqual(['server', 'start', '--bind', '127.0.0.1']);
+  });
+});
+
+describe('§6.4 模型卸载', () => {
+  it('未配置模型时不卸载，也不做任何进程操作', async () => {
+    const runLms = vi.fn(fakeLms([]));
     const manager = new LMStudioProcessManager(
       managerOptions({
-        baseUrl: 'http://127.0.0.1:1234/v1',
-        findPid: findPid as unknown as ManagerOptions['findPid'],
-        isLmStudio: (async () => true) as unknown as ManagerOptions['isLmStudio'],
-        terminate: (async () => false) as unknown as ManagerOptions['terminate'],
+        modelId: '   ',
+        runLms: runLms as unknown as ManagerOptions['runLms'],
+        locate: (() => null) as unknown as ManagerOptions['locate'],
       }),
     );
-    await manager.startup();
-    await manager.shutdown({ force: true });
-    expect(findPid).toHaveBeenCalledWith(1234);
+    const result = await manager.unload();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain('LMSTUDIO_MODEL');
+    expect(runLms).not.toHaveBeenCalled();
+  });
+
+  it('找不到 lms CLI 时降级：什么都不做，不终止进程', async () => {
+    const runLms = vi.fn(fakeLms([MODEL]));
+    const manager = new LMStudioProcessManager(
+      managerOptions({
+        locate: (() => null) as unknown as ManagerOptions['locate'],
+        runLms: runLms as unknown as ManagerOptions['runLms'],
+      }),
+    );
+    const result = await manager.unload();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain('未找到 lms CLI');
+    expect(runLms).not.toHaveBeenCalled();
+  });
+
+  it('目标模型未驻留时视为成功，且不发起 unload', async () => {
+    const calls: string[][] = [];
+    const manager = new LMStudioProcessManager(
+      managerOptions({
+        runLms: fakeLms(['别的模型'], calls) as unknown as ManagerOptions['runLms'],
+        locate: (() => ({ path: 'lms.exe', kind: 'lms-cli' as const, source: 't', args: [] })) as unknown as ManagerOptions['locate'],
+      }),
+    );
+    await expect(manager.unload()).resolves.toEqual({ ok: true, unloaded: [], residual: [] });
+    expect(calls.filter((c) => c[0] === 'unload')).toEqual([]);
+  });
+
+  it('精确卸载目标模型，且不碰其它模型', async () => {
+    const loaded = [MODEL, '别的模型'];
+    const calls: string[][] = [];
+    const manager = new LMStudioProcessManager(
+      managerOptions({
+        runLms: fakeLms(loaded, calls) as unknown as ManagerOptions['runLms'],
+        locate: (() => ({ path: 'lms.exe', kind: 'lms-cli' as const, source: 't', args: [] })) as unknown as ManagerOptions['locate'],
+      }),
+    );
+    const result = await manager.unload();
+    expect(result.ok).toBe(true);
+    expect(result.unloaded).toEqual([MODEL]);
+    expect(loaded).toEqual(['别的模型']);
+    expect(calls.filter((c) => c[0] === 'unload')).toEqual([['unload', MODEL]]);
+  });
+
+  it('目标模型有多个实例时全部卸载，不留残余', async () => {
+    const loaded = [MODEL, `${MODEL}:2`, `${MODEL}:3`, '别的模型'];
+    const manager = new LMStudioProcessManager(
+      managerOptions({
+        runLms: fakeLms(loaded) as unknown as ManagerOptions['runLms'],
+        locate: (() => ({ path: 'lms.exe', kind: 'lms-cli' as const, source: 't', args: [] })) as unknown as ManagerOptions['locate'],
+      }),
+    );
+    const result = await manager.unload();
+    expect(result.ok).toBe(true);
+    expect(result.unloaded).toEqual([MODEL, `${MODEL}:2`, `${MODEL}:3`]);
+    expect(loaded).toEqual(['别的模型']);
+  });
+
+  it('复核发现仍有实例驻留时 ok=false 并回报 residual（退出码不可信，只能靠 ps 复核）', async () => {
+    // 替身对 unload 装作成功但实际不移除 —— 模拟"退出码 0 但没真卸掉"。
+    const calls: string[][] = [];
+    const manager = new LMStudioProcessManager(
+      managerOptions({
+        runLms: (async (_exe: string, args: string[]) => {
+          calls.push(args);
+          if (args[0] === 'ps') {
+            return {
+              ok: true, code: 0, timedOut: false, stderr: '',
+              stdout: JSON.stringify([{ identifier: MODEL }]),
+            };
+          }
+          return { ok: true, code: 0, stdout: 'unloaded', stderr: '', timedOut: false };
+        }) as unknown as ManagerOptions['runLms'],
+        locate: (() => ({ path: 'lms.exe', kind: 'lms-cli' as const, source: 't', args: [] })) as unknown as ManagerOptions['locate'],
+      }),
+    );
+    const result = await manager.unload();
+    expect(result.ok).toBe(false);
+    expect(result.residual).toEqual([MODEL]);
+    // 复核必须真的发生过：ps → unload → ps
+    expect(calls).toEqual([['ps', '--json'], ['unload', MODEL], ['ps', '--json']]);
+  });
+
+  it('lms 超时即降级，不阻塞停机', async () => {
+    const manager = new LMStudioProcessManager(
+      managerOptions({
+        runLms: (async () => ({
+          ok: false, code: null, stdout: '', stderr: '', timedOut: true,
+        })) as unknown as ManagerOptions['runLms'],
+        locate: (() => ({ path: 'lms.exe', kind: 'lms-cli' as const, source: 't', args: [] })) as unknown as ManagerOptions['locate'],
+      }),
+    );
+    const result = await manager.unload();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain('超时');
+  });
+});
+
+describe('lmsCli 解析', () => {
+  it('空数组与垃圾输出都不会被当成"已卸载干净"', () => {
+    expect(parseLoadedIdentifiers('[]')).toEqual([]);
+    expect(parseLoadedIdentifiers('')).toEqual([]);
+    expect(parseLoadedIdentifiers('not json')).toEqual([]);
+    expect(parseLoadedIdentifiers('[{"identifier":"m"},{"identifier":" m:2 "}]')).toEqual(['m', 'm:2']);
+  });
+
+  it('instancesOf 匹配裸 id 与 :N 实例，但不会误伤同前缀的其它模型', () => {
+    expect(instancesOf(['m', 'm:2', 'm:3', 'm2', 'model-x'], 'm')).toEqual(['m', 'm:2', 'm:3']);
   });
 });
 
@@ -357,9 +392,14 @@ describe('§6.2 定位 lmstudio / lms', () => {
   it('LMSTUDIO_EXE 覆盖优先，且必须是存在的文件', () => {
     const dir = scratchDir('locate');
     const fake = path.join(dir, 'fake-lmstudio.exe');
-    fs.writeFileSync(fake, 'stub');
-    expect(locateLmStudio({ override: fake })?.path).toBe(fake);
-    expect(locateLmStudio({ override: path.join(dir, '不存在.exe') })).toBeNull();
+    try {
+      fs.writeFileSync(fake, 'stub');
+      expect(locateLmStudio({ override: fake })?.path).toBe(fake);
+      expect(locateLmStudio({ override: path.join(dir, '不存在.exe') })).toBeNull();
+    } finally {
+      // scratch 清理：否则这个假可执行文件会留在 `.temp/tests/locate/`。
+      fs.rmSync(fake, { force: true });
+    }
   });
 
   it('lms.exe 走 `server start`，桌面版不带子命令（§6.3 实测）', () => {

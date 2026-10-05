@@ -11,7 +11,6 @@ export const ErrorCode = {
   entryNotFound: 'ENTRY_NOT_FOUND',
   translationInFlight: 'TRANSLATION_IN_FLIGHT',
   lmstudioUnavailable: 'LMSTUDIO_UNAVAILABLE',
-  lmstudioNotOwned: 'LMSTUDIO_NOT_OWNED',
   invalidJson: 'INVALID_JSON',
   notFound: 'NOT_FOUND',
   internal: 'INTERNAL_ERROR',

@@ -124,7 +124,7 @@ beforeAll(async () => {
   // 真实模型冷加载可能很久，给一次预热机会（与生产启动路径一致，§13 第 5 条）。
   // 模型已驻留时这里必须是"跳过"：LM Studio 每次成功 load 都会新建实例。
   const warmup = await ctx.processManager.warmup(E2E_MODEL);
-  const status = await api<{ running: boolean; startedByUs: boolean; modelLoaded?: string }>(
+  const status = await api<{ running: boolean; modelLoaded?: string }>(
     ctx.baseUrl,
     'GET',
     '/api/lmstudio/status',
@@ -138,7 +138,7 @@ beforeAll(async () => {
       `模型总数        : ${models.length}`,
       `本次使用模型    : ${modelId}`,
       `端点报告已加载  : ${loadedModel ?? '（无）'}`,
-      `状态接口        : running=${String(status.body.running)} startedByUs=${String(status.body.startedByUs)} modelLoaded=${status.body.modelLoaded ?? '-'}`,
+      `状态接口        : running=${String(status.body.running)} modelLoaded=${status.body.modelLoaded ?? '-'}`,
       `预热            : attempted=${String(warmup.attempted)} alreadyResident=${String(warmup.alreadyResident)} model=${warmup.model ?? '-'} ok=${String(warmup.ok)}`,
       '==========================',
       '',
@@ -154,7 +154,6 @@ describe('环境前置条件', () => {
   it('端点可达，且本次要用的模型在 /v1/models 中', () => {
     expect(modelId).toBeTruthy();
     expect(models.length).toBeGreaterThan(0);
-    expect(ctx.processManager.status().startedByUs).toBe(false);
   });
 
   it('§13-5 状态接口能报告已加载模型（用于决定是否需要预热）', async () => {

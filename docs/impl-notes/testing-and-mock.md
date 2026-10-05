@@ -43,12 +43,20 @@ under `pnpm test` alongside everything else. The files are `.tsx`, which is why
 `vitest.config.ts` includes both `tests/**/*.test.ts` and `tests/**/*.test.tsx`.
 
 - `translator.test.tsx`, `useTranslator.test.tsx` — output box rendering (position after
-  the source textarea, read-only, empty state, disabled actions) and the streaming state
-  machine.
+  the source textarea, read-only, empty state, disabled actions), the streaming state
+  machine, and the source-input 清空 / 直接存历史 buttons.
+- `multiselect.test.tsx` — the history multi-select semantics (§9.2): two checkbox ticks
+  → 已选 2 条, Ctrl+click toggle, Shift+click range, header select-all, against a stubbed
+  JSON API rendering real `history-row` DOM.
 - `preferences.test.ts` — preference validation, key versioning, fault tolerance.
 - `preferences-hooks.test.tsx` — restore-on-mount, persist-on-change, no first-frame
   overwrite.
 - `app-preferences.test.tsx` — `App`-level restore behaviour against a stub JSON API.
+
+One selector gotcha: because the source input and the output box each have a **清空**
+button, tests that target the *output* clear button must scope the query to
+`.output-actions button` — a bare `button` search now finds the source-input 清空 first
+and clicks the wrong one.
 
 Two constraints shape how these are written:
 
@@ -107,11 +115,44 @@ A dependency-free `node:http` server implementing the OpenAI-compatible subset:
   contexts can coexist in one process.
 - `mockHeaders: true` is the default, and the harness sets the mock-only headers through
   the service options; nothing about production traffic changes.
-- `spawnOwnedProcess` (default off) makes `startedByUs === true` testable by spawning an
-  inert `node -e setInterval(...)` child and routing termination through an injected
-  stub. **No test ever runs `taskkill` or names a process image to clean up.**
+- `loadedInstances` seeds an in-memory list that stands in for `lms ps --json`, and the
+  harness answers `lms unload <id>` by removing from it. That is how unload is asserted:
+  by watching the list shrink and the final re-read come back clean.
+- `runLms` is injected, so **no test ever executes a real `lms` command** — and with the
+  kill path retired there is nothing left to kill either. **No test runs `taskkill` or
+  names a process image to clean up.**
+- `lmsFailure` ('timeout' / 'spawn-error') and `lmsMissing` drive the degradation paths:
+  a stuck or absent CLI must degrade to "do nothing", never to "terminate something".
+- `lmsCalls` records the argument vectors, which is how the startup arguments
+  (`-p`, `--bind`) and the unload target are asserted.
 - `http.ts` provides `api()` (JSON request + typed body), `readSse()` (raw text plus
   parsed events) and `waitFor()` (bounded polling for asynchronous state).
+
+## Scratch cleanup is the test's job, not the runner's
+
+`paths.ts#scratchDir()` only **creates** the directory under `.temp/tests/`; it never
+removes anything. A test that allocates a file there must delete it, or `.temp/tests/`
+grows by one copy per test per run.
+
+`paths.ts#removeDbFiles(dbPath)` is the shared helper for that — it removes the database
+plus its `-wal` / `-shm` sidecars, and swallows failures so cleanup can never turn into a
+test failure. It lives in `paths.ts` rather than in `context.ts` because several fixtures
+need it, and having it private to one of them is how the leak shipped in the first place.
+
+Two tests were fixed for this and are the reference for the pattern:
+
+- `unit/collectionService.test.ts` — one database per test in `beforeEach`, so it calls
+  `removeDbFiles` in `afterEach`.
+- `server/lifecycle.test.ts` — the locate test writes a fake `LMStudio.exe`, so it
+  removes it in a `finally`.
+
+`context.ts#close()` already did the right thing, which is why `.temp/tests/server/`
+stayed empty while `.temp/tests/unit/` accumulated dozens of files.
+
+**Do not "fix" this by wiping `.temp/tests` from the `test` script.** A blanket delete
+also throws away the state of a failing run you are debugging, breaks concurrent runs, and
+skips cleanup entirely when Vitest crashes (an `&&` chain only runs on success). A
+per-test `afterEach` is both narrower and more reliable.
 
 ## Pitfall: never bind test listeners with `listen(0)`
 
@@ -140,9 +181,14 @@ low port, for the same reason.
 | Mid-stream disconnect | `translate.test.ts` (error event, nothing persisted) |
 | Collection CRUD and active switching | `api.test.ts`, `unit/collectionService.test.ts` |
 | Single and batch delete | `api.test.ts`, `unit/collectionService.test.ts` |
+| `POST /api/entries` direct save (no translation) | `api.test.ts` (writes the row; 400 on empty text / bad direction; 404 on missing collection) |
 | Deleting the active collection switches automatically | `api.test.ts`, `unit/collectionService.test.ts` |
-| Shutdown with `startedByUs=true` | `shutdown.test.ts`, `lmstudioRoute.test.ts` |
-| Shutdown with `startedByUs=false` (409, UI confirmation path) | `lmstudioRoute.test.ts`, `shutdown.test.ts` |
+| Shutdown unloads the model and leaves the server running | `shutdown.test.ts`, `lmstudioRoute.test.ts` |
+| Unload targets only `LMSTUDIO_MODEL` and its `:N` instances | `server/lifecycle.test.ts` |
+| `lms unload` exit code is ignored; `lms ps --json` decides | `server/lifecycle.test.ts` (residual ⇒ `ok: false`) |
+| Unload degrades instead of killing when `lms` fails or hangs | `server/lifecycle.test.ts` |
+| Shutdown order: unload → stop accepting → close resources | `shutdown.test.ts` |
+| Startup args carry `-p <port>` and `--bind 127.0.0.1` | `server/lifecycle.test.ts` (`serverStartArgs`) |
 
 Extra regression coverage worth keeping:
 

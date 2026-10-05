@@ -5,7 +5,7 @@
  * 呈现在输入框下方，方便直接阅读与复制；落库仍只发生在 done 时（§5.3）。
  */
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export interface OutputBoxProps {
   /** 要显示的译文（流式期间为已累积的增量）。 */
@@ -32,6 +32,15 @@ export function OutputBox({
 }: OutputBoxProps): JSX.Element {
   const [copied, setCopied] = useState(false);
 
+  // 让输出框随内容自动拉长（流式期间随增量逐字增高），清空时自动回缩到最小高度。
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const node = textareaRef.current;
+    if (!node) return;
+    node.style.height = 'auto';
+    node.style.height = `${node.scrollHeight}px`;
+  }, [text]);
+
   const hasText = text !== '';
 
   const handleCopy = (): void => {
@@ -40,8 +49,7 @@ export function OutputBox({
         await navigator.clipboard.writeText(text);
       } catch {
         // 剪贴板不可用（非安全上下文等）时退化为选中文本，至少让用户能手动复制。
-        const node = document.getElementById('translation-output') as HTMLTextAreaElement | null;
-        node?.select();
+        textareaRef.current?.select();
       }
       setCopied(true);
       window.setTimeout(() => {
@@ -85,6 +93,7 @@ export function OutputBox({
       </div>
 
       <textarea
+        ref={textareaRef}
         id="translation-output"
         className="output-text"
         value={text}

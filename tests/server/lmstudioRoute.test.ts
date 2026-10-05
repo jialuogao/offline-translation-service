@@ -19,86 +19,73 @@ afterEach(async () => {
   await mock.close();
 });
 
-describe('POST /api/lmstudio/shutdown', () => {
-  it('外部实例且未 force：返回 409 让前端弹窗确认（§5.4 / §6.4）', async () => {
-    const response = await api<{ error: string }>(
+describe('POST /api/lmstudio/unload', () => {
+  it('卸载已驻留的目标模型，不关后端、不关 LM Studio（§6.4）', async () => {
+    await ctx.close();
+    ctx = await createTestContext({
+      lmStudioBaseUrl: mock.baseUrl,
+      modelId: '目标模型',
+      loadedInstances: ['目标模型', '别的模型'],
+    });
+    const response = await api<{ ok: boolean; unloaded: string[] }>(
       ctx.baseUrl,
       'POST',
-      '/api/lmstudio/shutdown',
+      '/api/lmstudio/unload',
       {},
     );
-    expect(response.status).toBe(409);
-    expect(response.body.error).toBe('LMSTUDIO_NOT_OWNED');
-    // 只关 LM Studio，不关后端。
+    expect(response.status).toBe(200);
+    expect(response.body.ok).toBe(true);
+    expect(response.body.unloaded).toEqual(['目标模型']);
+    // 后端仍在运行。
     expect(ctx.exitCalls).toHaveLength(0);
+    expect((await fetch(`${mock.baseUrl}/v1/models`)).status).toBe(200);
   });
 
-  it('本会话启动的实例：直接关闭，不要求 force', async () => {
-    const terminateCalls: number[] = [];
-    // 指向一个没有监听者的端口：启动路径会走 spawn（归属=本会话），
-    // 就绪探测超时为 0，因此 startup 立即返回但已记录 PID。
-    const owned = await createTestContext({
-      lmStudioBaseUrl: 'http://127.0.0.1:65530',
-      spawnOwnedProcess: true,
-      terminate: async (pid) => {
-        terminateCalls.push(pid);
-        return true;
-      },
+  it('目标未驻留时 ok=true 且 unloaded 为空', async () => {
+    await ctx.close();
+    ctx = await createTestContext({
+      lmStudioBaseUrl: mock.baseUrl,
+      modelId: '目标模型',
+      loadedInstances: ['别的模型'],
     });
-    try {
-      const status = await api<{ startedByUs: boolean; pid?: number }>(
-        owned.baseUrl,
-        'GET',
-        '/api/lmstudio/status',
-      );
-      expect(status.body.startedByUs).toBe(true);
+    const response = await api<{ ok: boolean; unloaded: string[] }>(
+      ctx.baseUrl,
+      'POST',
+      '/api/lmstudio/unload',
+      {},
+    );
+    expect(response.body).toMatchObject({ ok: true, unloaded: [] });
+  });
 
-      const response = await api<{ ok: boolean }>(
-        owned.baseUrl,
-        'POST',
-        '/api/lmstudio/shutdown',
-        {},
-      );
-      expect(response.status).toBe(200);
-      expect(response.body.ok).toBe(true);
-      expect(terminateCalls).toEqual([status.body.pid]);
-    } finally {
-      await owned.close();
-    }
+  it('卸载失败返回 200 + ok=false + 原因（不是服务器错误）', async () => {
+    await ctx.close();
+    ctx = await createTestContext({
+      lmStudioBaseUrl: mock.baseUrl,
+      lmsFailure: 'timeout',
+    });
+    const response = await api<{ ok: boolean; reason: string }>(
+      ctx.baseUrl,
+      'POST',
+      '/api/lmstudio/unload',
+      {},
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.ok).toBe(false);
+    expect(response.body.reason).toBeTruthy();
+    expect(ctx.exitCalls).toHaveLength(0);
   });
 });
 
 describe('POST /api/shutdown', () => {
-  it('先返回 { ok: true }，再关库并退出，且不动外部 LM Studio', async () => {
-    const response = await api<{ ok: boolean }>(ctx.baseUrl, 'POST', '/api/shutdown', {
-      closeLmStudio: false,
-    });
+  it('先返回 { ok: true }，再卸载模型、关库并退出（ok 仅表示已受理）', async () => {
+    const response = await api<{ ok: boolean }>(ctx.baseUrl, 'POST', '/api/shutdown', {});
     expect(response.status).toBe(200);
     expect(response.body.ok).toBe(true);
 
     await waitFor(() => ctx.exitCalls.length === 1, { label: '服务完成停机' });
     expect(ctx.exitCalls).toEqual([0]);
-    // 外部 LM Studio（Mock）必须仍在运行。
+    // LM Studio 服务器保持运行——本设计永不终止它。
     expect((await fetch(`${mock.baseUrl}/v1/models`)).status).toBe(200);
-  });
-
-  it('closeLmStudio=true 时走外部实例关闭流程（允许失败）并仍然退出', async () => {
-    // 外部实例关闭只能"尽力"：Mock 进程不会被真的 taskkill，故 ok 允许为 false。
-    const response = await api<{ ok: boolean }>(ctx.baseUrl, 'POST', '/api/shutdown', {
-      closeLmStudio: true,
-    });
-    expect(response.status).toBe(200);
-    expect(typeof response.body.ok).toBe('boolean');
-    await waitFor(() => ctx.exitCalls.length === 1, { label: '服务完成停机' });
-    expect((await fetch(`${mock.baseUrl}/v1/models`)).status).toBe(200);
-  });
-
-  it('closeLmStudio 非布尔值返回 400', async () => {
-    const response = await api<{ error: string }>(ctx.baseUrl, 'POST', '/api/shutdown', {
-      closeLmStudio: 'yes',
-    });
-    expect(response.status).toBe(400);
-    expect(response.body.error).toBe('INVALID_REQUEST');
   });
 });
 

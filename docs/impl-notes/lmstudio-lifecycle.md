@@ -18,7 +18,135 @@ ownership rules exist to protect the user's machine, not just this application.
 | Are models preloaded? | No. All models report `not-loaded`; the first inference triggers an implicit load |
 | Is `Get-NetTCPConnection` usable? | Not in a normal user session — it fails with "access denied"; `netstat -ano -p tcp` works |
 
-`DESIGN.md` §6.2/§6.3 and §13 record these conclusions.
+Measured again on 2026-10-05 with the CLI itself:
+
+| Question | Result |
+|---|---|
+| Is there an `lms` command that launches the **desktop app**? | No explicit one — the CLI exposes only `chat / get / load / unload / ls / ps / import / server / log / link / runtime / clone / push / dev / login / logout / whoami`. But `lms server start` **indirectly** starts a headless `LM Studio.exe --run-as-service` when nothing is running (see below) |
+| `lms server start` with the app already open | **290 ms**, exit code 0, leaves **no** `lms.exe` process behind |
+| `lms server start` with nothing running (cold) | **3346 ms**, exit code 0, launches `LM Studio.exe --run-as-service` (5 processes, no window), server answers `/v1/models` |
+| `lms server stop` | **269 ms**, exit code 0, frees the port, leaves the desktop app untouched (same pid, same start time). **Does not unload the model** |
+| Where does `lms` write its messages? | **stderr**, not stdout |
+| Can a model be unloaded without touching the server? | Yes — `lms unload <identifier>` (exit 0, ~2.4 s, server keeps listening). A **bare `lms unload` may block on an interactive prompt** when several models are loaded; always pass an identifier or `-a` |
+| `lms unload` exit code when the model is **not** loaded? | **Still 0**, printing `Model Not Found`. The exit code is useless for success detection — re-check with `lms ps --json` (returns a clean `[]`) |
+| Does `lms server start` accept a port? | `-p, --port <port>` and `--bind <address>` (default `127.0.0.1`). **Without `-p` the server reuses the port from last time**, not necessarily 1234 |
+| Is there an idle auto-unload? | `lms ps` shows a `TTL` column counting down (`30m / 1h` → `21m / 1h` over ~9 min), so LM Studio unloads idle models on its own after ~1 h |
+
+## The `lms` CLI can cold-start the server (verified)
+
+An earlier draft of this note claimed the CLI was a thin client that could not start LM
+Studio on a cold machine. **That was wrong and has been corrected.** Measured 2026-10-05
+with the desktop app fully exited (0 `LM Studio.exe` processes, nothing on port 1234):
+
+```
+$ lms server start
+Waking up LM Studio service...          <-- written to STDERR
+Success! Server is now running on port 1234
+exit code 0, 3346 ms
+```
+
+Result: 5 `LM Studio.exe` processes appeared, **none with a window**, and the listener was
+
+```
+"L:\...\LM Studio.exe" --run-as-service
+```
+
+So `lms server start` has two distinct behaviours:
+
+| Precondition | Behaviour | Measured |
+|---|---|---|
+| Desktop app already running | Asks the running app to open the server | 272–290 ms, no lingering `lms.exe` |
+| Nothing running | Launches `LM Studio.exe --run-as-service` (headless, no GUI) | 3346 ms, 5 processes, no window |
+
+Two practical consequences:
+
+- The backend's `spawn('lms.exe', ['server', 'start'])` is genuinely useful on a cold
+  machine; the operator does **not** have to open LM Studio first.
+- `lms` writes its progress and success messages to **stderr**, not stdout. Piping stdout
+  alone (`& $lms ... | Out-Null`) discards them; use file redirection when diagnosing.
+
+**Do not call `lms server status` when nothing is running.** In this session it was the
+suspected cause of a command that never returned. Anything invoked from the service should
+run as a bounded child process with its own timeout, never as an unbounded foreground call.
+
+## LM Studio is an Electron app; the main process is not the one that looks like the app
+
+With the desktop app open there are **six** processes all named `LM Studio.exe`:
+
+| Role marker | Role |
+|---|---|
+| *(no arguments)* | **main process** — also the one holding the port-1234 socket |
+| `--type=gpu-process` | GPU child (the one with the earliest-looking PID is *not* this) |
+| `--type=utility --utility-sub-type=network.mojom.NetworkService` | network |
+| `--type=utility --utility-sub-type=node.mojom.NodeService` | node |
+| `--type=renderer` | renderer |
+| `--type=crashpad-handler` | crash reporting |
+
+`MainWindowHandle` is `0` on the main process, so `taskkill /PID <main>` reports success via
+WM_CLOSE while the app stays alive. Signalling a **child** PID (e.g. the GPU process) is a
+silent no-op. Only the main process exits the whole tree. `findPidListeningOnPort` picking the
+lowest PID happens to land on the main process here, which is lucky rather than guaranteed.
+
+## Resident model state lives in the app process
+
+Verified separately: with the server **stopped** (`lms server status` → "not running", port
+1234 free, `/v1/models` refusing), `lms ps` still reports
+`hy-mt2-30b-a3b-uncensored-v1-apex  IDLE  14.23 GB  Local`. Stopping the server does **not**
+unload the model, and only the app process holds that state.
+
+## Consequence: the recorded child PID is dead on arrival
+
+`launch()` spawns `lms.exe server start` and records **that CLI's PID**. Since the CLI exits
+after ~290 ms, the PID is stale almost immediately:
+
+- `child.on('exit')` fires and resets `child = null` / `startedByUs = false` (see
+  `process.ts`), while `startup()` returns a **hard-coded** `startedByUs: true`.
+  `startup()`'s return value and `status()` therefore disagree.
+- Since `run.ps1` starts LM Studio before the backend boots, the backend's early
+  "already running" return path is what actually runs in practice, so the UI always sees
+  `startedByUs === false`.
+- The stale PID must **never** be passed to `taskkill`: Windows reuses PIDs, so it could
+  hit an unrelated process. `DESIGN.md` §6.4 now forbids every PID-based termination, which
+  retires this hazard by construction.
+
+The unit tests miss this because `tests/server/lifecycle.test.ts` substitutes
+`nodeChild()` — a **long-lived** `node -e` process — for `lms.exe`. A process that never
+exits never fires the `exit` listener, so the hole is invisible to the suite.
+
+## Shutdown is unload-only (implemented)
+
+`DESIGN.md` §6.4 was re-decided on 2026-10-05 and **implemented in the same change**:
+the service **never terminates LM Studio** and **never runs `lms server stop`**. It
+unloads only the model named by `LMSTUDIO_MODEL` (including every `:N` instance of
+it), verifies with `lms ps --json`, and leaves the server running.
+
+`LMStudioProcessManager.shutdown({ force })`, the `startedByUs` / `pid` fields and
+the `findPid` / `isLmStudio` / `terminate` injection points are **gone**. What
+replaced them is `unload()` plus the `lmsCli.ts` runner. The historical behaviour
+this retired is not described anywhere in the code any more.
+
+Everything below that still speaks of `shutdown({ force })`, `startedByUs` or
+`stoppedByUs` is stale — those sections were kept only to record why the old design
+was abandoned, and should be read as history, not as current behaviour.
+
+## `lmsCli.ts` — every `lms` call is a bounded child process
+
+`runLms(exePath, args, timeoutMs)` wraps `execFile` with `windowsHide`, a hard timeout
+and both streams captured. Two design points that are easy to get wrong:
+
+- **Never call `lms` in the foreground.** `lms server status` was observed not
+  returning when nothing was running, which hung a diagnostic session outright.
+- **`lms unload` always exits 0**, even printing `Model Not Found` for a model that is
+  not resident. Success therefore cannot come from the exit code; `unload()` re-reads
+  `lms ps --json` and reports `ok` only when the target id and its `:N` variants are
+  gone. `residual` is populated when the re-read still finds them, which is the signal
+  that memory was **not** freed.
+
+`parseLoadedIdentifiers` treats anything that is not a JSON array of `{identifier}`
+as "cannot confirm" rather than "nothing loaded", and `unload()` only accepts a
+literal `[]` as proof that the list is empty. Conflating the two would silently skip
+the unload. `instancesOf()` matches `id` and `id:N` but not `id2`, so a model whose
+name merely starts with the target is left alone.
 
 ## Resolution order (`locate.ts`)
 
@@ -39,40 +167,49 @@ ownership rules exist to protect the user's machine, not just this application.
 `LMSTUDIO_START_ARGS`), `desktop` → no arguments. Resolution failure is not fatal: the
 service still starts and translation degrades to `LMSTUDIO_UNAVAILABLE`.
 
+**Only `kind === 'lms-cli'` is ever spawned.** The desktop build has no `server start`
+and no `unload`, so resolving to it means the service cannot manage anything; it logs
+that and continues with `running: false` instead of launching a GUI application
+(`DESIGN.md` §6.3).
+
+`serverStartArgs(baseUrl, locatedArgs)` appends `-p <port>` and `--bind 127.0.0.1`
+before the spawn. It is a pure exported function so the arguments can be asserted
+without mocking ESM `spawn`, which cannot be redefined.
+
 ## `LMStudioProcessManager`
 
-State is `child` (the spawned process, if any), `startedByUs`, `stoppedByUs`. All the
-process-touching collaborators (`locate`, `findPid`, `isLmStudio`, `terminate`, `sleep`)
-are injectable, which is how the tests exercise every branch without touching a real
-LM Studio.
+State is just `child` (the spawned process, if any). The injectable collaborators are
+`locate`, `runLms` and `sleep`, which is how the tests exercise every branch without
+running a real `lms` command or touching a real LM Studio. The former `findPid` /
+`isLmStudio` / `terminate` injection points are gone with the kill path.
 
 ### `startup()`
 
-1. Probe once — reachable means `{ running: true, startedByUs: false }`, **no spawn**.
+1. Probe once — reachable means `{ running: true }`, **no spawn**.
 2. Respect `LMSTUDIO_AUTOSTART`; when disabled, never even locate the executable.
-3. Locate, `spawn(..., { windowsHide: !LMSTUDIO_SHOW_CONSOLE, detached: false, stdio: 'ignore' })`,
-   set `startedByUs = true`, attach `error`/`exit` listeners, `unref()` the child so it
-   never keeps this process alive.
-4. Poll `waitUntilReachable()` — interval is `LMSTUDIO_PROBE_INTERVAL_MS` for the first
+3. Locate; if resolution yields the **desktop** build, stop here with `running: false`
+   (it has no `lms` subcommands, so nothing could be started or unloaded later).
+4. Otherwise `spawn(serverStartArgs(...), { windowsHide: !LMSTUDIO_SHOW_CONSOLE, detached: false, stdio: 'ignore' })`,
+   attach `error`/`exit` listeners, and `unref()` the child so it never keeps this
+   process alive. **No PID is recorded** — see "dead on arrival" above.
+5. Poll `waitUntilReachable()` — interval is `LMSTUDIO_PROBE_INTERVAL_MS` for the first
    10 attempts, then doubles to a 3000 ms ceiling, bounded by
    `LMSTUDIO_STARTUP_TIMEOUT_MS`.
-5. Return `running: false` on timeout while **keeping** `startedByUs = true`: the child
-   exists and we own it, so it must still be cleaned up on shutdown.
+6. Return `running: false` on timeout. There is nothing to clean up afterwards by
+   design: the server is hosted by LM Studio, not by the process we spawned.
 
-The `exit` listener marks the process as gone (so `running` becomes false and a later
-`startup()` can retry), unless we are the ones shutting it down.
+### Historical: `shutdown({ force })` (removed)
 
-### `shutdown({ force })`
+This is what §6.4 replaced. Kept only to record why it was abandoned:
 
-- `startedByUs === true` → `taskkill /PID <pid> /T /F` via the recorded child PID. This
-  path ignores `force`, per §5.4.
-- `startedByUs === false` and `force !== true` → `{ ok: false }`, which the route turns
-  into **409 `LMSTUDIO_NOT_OWNED`**. The user must confirm in the UI first.
-- `startedByUs === false` and `force === true` → resolve the PID from
-  `LMSTUDIO_BASE_URL`'s port, verify the process name really is LM Studio, then kill.
-  No listener on the port means the target is already gone (`ok: true`).
-- `ok` means "terminated **and** the endpoint is no longer reachable"; success is not
-  required, failures are logged and ignored (§6.4).
+- `startedByUs === true` → `taskkill /PID <pid> /T /F` via the recorded child PID.
+- `startedByUs === false` and no `force` → 409 `LMSTUDIO_NOT_OWNED`, UI confirmation.
+- `startedByUs === false` and `force === true` → resolve the PID from the port, verify
+  the process name, then kill.
+
+It failed for two independent reasons: the recorded PID belonged to a short-lived CLI
+and could be recycled by Windows, and stopping the *server* never freed the model
+anyway (the weights live in the desktop app process). `unload()` fixes both.
 
 ### Process identity checks (`winProcess.ts`)
 
@@ -83,6 +220,12 @@ The `exit` listener marks the process as gone (so `running` becomes false and a 
   image name or session name to match `LM Studio`. Any doubt returns `false`. This check
   is what keeps a foreign process squatting on port 1234 from being killed.
 
+**Neither function is called by production code any more** — §6.4 removed every
+PID-based termination. They stay because the probing methods are verified and reusable
+if process management is ever deliberately reinstated. `terminateProcessTree` is the
+only one that actually acts, and nothing calls it. See `AGENTS.md`
+("LM Studio process safety"): ask the user before removing any of it.
+
 ### Warm-up (`warmup()`)
 
 `GET /api/v0/models` reports models that are on disk as `not-loaded`, so the first
@@ -91,6 +234,11 @@ fires `warmup()` **without awaiting it**; it picks the first already-loaded mode
 the first listed model) and calls `POST /api/v1/models/load` with the generous
 `LMSTUDIO_LOAD_TIMEOUT_MS`. Failure is logged and ignored. Set `LMSTUDIO_WARMUP=false`
 to skip.
+
+`bootstrap.ts` passes `config.lmstudioModel`, which since 2026-10-05 defaults to a
+**specific** model id rather than empty. It used to be empty, which made `resolveModel()`
+fall through to "first entry of `/v1/models`" — a choice dictated by LM Studio's list
+order rather than by us. Load, warm-up and unload now all agree on the same id.
 
 #### Why the load call must be guarded (verified defect)
 
@@ -132,22 +280,28 @@ If instances do pile up, eject the extras in the LM Studio UI or with
 `probeStatus()` is what `GET /api/lmstudio/status` returns:
 
 - `running` comes from a live probe, not from our bookkeeping.
-- `startedByUs` comes **only** from our own record. It stays `true` for a process we
-  spawned even while it is still loading and therefore not yet reachable — the UI must
-  still be told to close what this session owns.
 - `modelLoaded` prefers a model whose `state` is `loaded`, else the first listed model.
-- `pid` is the recorded child PID, present only when we spawned it.
+- `startedByUs` and `pid` were **removed** on 2026-10-05. They existed to drive the
+  ownership decision that §6.4 deleted, the ownership value was wrong in practice (the
+  short-lived CLI's `exit` listener reset it within ~300 ms), and the PID was a stale
+  number with no diagnostic value.
 
 `GET /api/lmstudio/models` returns `{ models: [] }` when the endpoint is unreachable
 rather than propagating an error; `running` in `/status` is what expresses that state.
 
 ## Safety rules for tests and future changes
 
-- Tests must never start or stop a real LM Studio. Spawn-based tests substitute
-  `process.execPath` running `setInterval(() => {}, 1000)`, and every termination goes
-  through an injected `terminate` stub. There is no `taskkill` or image-name cleanup
-  anywhere in `tests/`.
-- Never terminate by image name, never run a blanket process cleanup, and never remove
-  the process-name verification before the `force` path.
-- When `startedByUs === false`, the signal path (§3.4-B) must never touch LM Studio, no
-  matter how tempting it is to "clean up".
+- Tests must never run a real `lms` command. `tests/helpers/context.ts` answers every
+  `lms` call from an in-memory instance list, so `lms unload` is asserted by watching
+  that list shrink and `lms ps --json` by what it reports.
+- There is no `taskkill`, no `process.kill` and no image-name cleanup anywhere in
+  `tests/`. When §6.4 retired the kill path, the test harness stopped spawning a
+  stand-in process entirely — there is nothing left to kill.
+- Never terminate by image name, and never run a blanket process cleanup. The service as
+  it stands cannot terminate LM Studio at all; if you reintroduce that, read
+  `AGENTS.md` ("LM Studio process safety") and restore the whole chain.
+- `shutdown.ps1` in the repo root is a **thin HTTP wrapper** for programmatic shutdown,
+  not a cleanup script: it posts `/api/shutdown` and then polls `/api/collections` until
+  the connection is refused. It must never kill a process. The poll is not optional —
+  the shutdown response only means "accepted", while the actual unload still runs, and
+  killing the terminal window during that window would cancel the unload.

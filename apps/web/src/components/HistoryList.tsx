@@ -244,13 +244,10 @@ export function HistoryList({
             <label
               className="cell-check"
               onClick={(event) => {
-                // 勾选框与普通点行一致：只选中该行并把锚点移到它；取消勾选只针对已选中的行（§9.2）。
+                // checkbox 语义：独立切换该项选中态（不改动其他行的选择），并把锚点
+                // 移到该行，方便随后 Shift+点击做连续范围选择（§9.2）。
                 event.stopPropagation();
-                if (selection.isSelected(entry.id)) {
-                  selection.toggle(entry.id);
-                } else {
-                  selection.selectOnly(index, entry.id);
-                }
+                selection.toggleKeepAnchor(entry.id);
               }}
             >
               <input

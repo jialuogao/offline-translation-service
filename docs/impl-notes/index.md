@@ -8,7 +8,7 @@ disagree, the code is right and the note is stale — fix it here.
 |---|---|---|
 | [runtime-and-config.md](runtime-and-config.md) | Startup order, configuration, shutdown wiring | `apps/server/src/index.ts`, `bootstrap.ts`, `config.ts`, `shutdown.ts` |
 | [collections-and-db.md](collections-and-db.md) | SQLite schema, migrations, collection/entry persistence | `apps/server/src/db/`, `services/collectionService.ts` |
-| [lmstudio-lifecycle.md](lmstudio-lifecycle.md) | Locating, spawning, probing and terminating LM Studio | `apps/server/src/lmstudio/` |
+| [lmstudio-lifecycle.md](lmstudio-lifecycle.md) | Locating, spawning, probing LM Studio; unloading the model on shutdown | `apps/server/src/lmstudio/` |
 | [translation-and-sse.md](translation-and-sse.md) | Prompt construction, streaming, REST/SSE contracts | `services/translationService.ts`, `routes/`, `http/` |
 | [web-client.md](web-client.md) | React SPA structure and interaction semantics | `apps/web/src/` |
 | [testing-and-mock.md](testing-and-mock.md) | Mock LM Studio and the regression suite | `tests/` |
@@ -31,8 +31,9 @@ disagree, the code is right and the note is stale — fix it here.
 
 - Changing how the process starts or shuts down (§3.3, §3.4) → `runtime-and-config`.
 - Touching SQL, timestamps or ordering → `collections-and-db`.
-- Anything that can start or kill a process → `lmstudio-lifecycle` first, for the
-  ownership rules; a mistake there affects the user's machine, not just this app.
+- Anything that can start a process, or unload a model → `lmstudio-lifecycle` first.
+  Since §6.4 was re-decided the service can no longer kill anything, but `lms server
+  start` is still a spawn with real side effects on the user's machine.
 - Prompt text, SSE framing or error codes → `translation-and-sse`.
 - Multi-select, streaming display or lifecycle dialogs → `web-client`.
 - Adding a regression test or changing the harness → `testing-and-mock`.

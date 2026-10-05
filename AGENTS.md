@@ -199,14 +199,31 @@ not allow changing the architecture layering or the interface contracts.
 `DESIGN.md` §3.4 and §6.4 make process ownership a product decision. Getting it
 wrong kills the user's model server or an unrelated process.
 
-- Terminate only an LM Studio instance this session started, identified by the
-  recorded child-process PID (`taskkill /PID <pid> /T`). Never terminate by image
-  name and never run a blanket process-cleanup command.
-- When LM Studio was already running before startup (`startedByUs === false`), do
-  not close it automatically. Ask the user, act only on their confirmation, and
-  treat failure as acceptable (§6.4).
-- To stop an externally started instance after confirmation, resolve the PID
-  bound to `127.0.0.1:1234` and verify it belongs to LM Studio before acting.
+**Current rule (re-decided 2026-10-05): the service never terminates LM Studio.**
+Shutdown unloads the configured model with `lms unload <identifier>` and leaves the
+local server running. Never call `taskkill` from the service, never terminate by
+image name, and never run a blanket process-cleanup command. When unload is not
+possible, do nothing and say so — a resident model is far cheaper than killing a
+process that may not be LM Studio.
+
+- `apps/server/src/lmstudio/winProcess.ts` (`findPidListeningOnPort`,
+  `isLmStudioProcess`, `terminateProcessTree`) is **retained but no longer called by
+  production code**, because §6.4 removed every PID-based termination. It is kept
+  deliberately, not by oversight: it encodes the verified `netstat -ano` /
+  `tasklist` probing methods and the process-identity check.
+  - If a task genuinely needs it — restarting or supervising LM Studio, a diagnostic
+    command, a future confirmed decision to manage the lifecycle — use it directly;
+    do not re-derive the `netstat` / `tasklist` approach.
+  - Do **not** delete it as incidental cleanup. If the user asks about dead code, or
+    you are doing a cleanup pass, ask them whether to remove it rather than deciding
+    on your own, and remember it has direct tests in `tests/server/lifecycle.test.ts`.
+- Any future change that re-introduces process termination must restore the full
+  safety chain: resolve a PID, verify the image name is really LM Studio, then act
+  only on the recorded or user-confirmed target, treating failure as acceptable.
+- LM Studio is an Electron app with several processes sharing one image name. The
+  **main process is the one whose command line has no `--type=` flag**; signalling a
+  child such as the GPU process is a silent no-op. See
+  `docs/impl-notes/lmstudio-lifecycle.md`.
 - Starting LM Studio is a side effect on the user's machine. Keep it on the
   documented startup path, and never install software, download models, or
   change LM Studio settings on the user's behalf (§1.2, §1.3).
@@ -243,14 +260,22 @@ gates for a meaningful change.
   Keep them in sync here and in `README.md`.
 - Regression coverage must not require a real LM Studio instance, a downloaded
   model, or Internet access. Cover the §8.3 cases, including mid-stream
-  disconnection (error event, nothing persisted) and the `startedByUs === false`
-  shutdown path.
+  disconnection (error event, nothing persisted) and the unload-on-shutdown path
+  (`lms unload <LMSTUDIO_MODEL>`, verified with `lms ps --json`, server left
+  running — §6.4). Tests must stub the `lms` child process, never run it.
 - For a verified runtime defect, add or update a focused regression test in the
   same task.
 - Tests that start a server or child process must identify the exact process by
   PID, command line, working directory, or test port before stopping it. Never
   kill processes by name; leave ambiguous ones alone and report the ambiguity.
-- Keep test scratch under `.temp/`, not the system temp directory.
+- Keep test scratch under `.temp/`, not the system temp directory. `scratchDir()`
+  only creates the directory, so a test that writes a file there must delete it too —
+  otherwise `.temp/tests/` grows by one copy per test per run. Use
+  `removeDbFiles()` from `tests/helpers/paths.ts` for SQLite files (it also removes the
+  `-wal` / `-shm` sidecars) and plain `fs.rmSync(..., { force: true })` otherwise.
+  Do not add a blanket wipe of `.temp/tests` to the `test` script: it destroys the state
+  of a failing run you may be debugging, breaks concurrent runs, and skips cleanup when
+  Vitest crashes.
 - Sandbox boundary on this Windows host: a confined sandbox cannot give Node.js
   child processes piped stdio (named-pipe restriction), so Vitest fails inside
   esbuild's service spawn with `spawn EPERM`. This is an environment boundary,
@@ -310,20 +335,30 @@ mechanisms, so consolidate new findings there rather than into this file.
 
 `run.ps1` is the operator entry point: preflight (Node/pnpm versions) → `pnpm install`
 when `node_modules` is missing → `pnpm build` when build output is missing or older than
-`apps/{server,web}/src` or `packages/contracts/src` → port check → LM Studio probe (with a
-`lms server start` fallback) → start the backend in its own window → poll
-`/api/collections` until ready → open the browser. Parameters: `-Port`, `-NoBrowser`,
-`-SkipBuild`, `-ForceBuild`.
+`apps/{server,web}/src` or `packages/contracts/src` → port check → LM Studio **status probe
+only** (the backend owns starting LM Studio; the script must not run `lms server start`
+itself) → start the backend in its own window → poll `/api/collections` until ready →
+open the browser. Parameters: `-Port`, `-NoBrowser`, `-SkipBuild`, `-ForceBuild`.
 
-Rules for these two files:
+Rules for these files:
 
 - `run.cmd` must stay **ASCII-only**. cmd.exe parses it in the OEM code page, so UTF-8
   Chinese turns into bogus commands ("is not recognized as an internal or external
   command"). All Chinese prompts belong in `run.ps1`.
 - `run.ps1` must stay parseable by **Windows PowerShell 5.1** (no `??`, no ternary
   operator, no `-Parallel`), because it is also what a double-click runs.
-- The scripts may only *start* things and *read* status: never `taskkill`, never unload or
-  load models beyond the documented warm-up, never touch `apps/server/data/`.
+- `shutdown.ps1` is the **programmatic** counterpart for callers that drive this service
+  from another program: it POSTs `/api/shutdown` and then polls `/api/collections`
+  until the connection is refused. It must stay a thin HTTP wrapper — it must never kill
+  a process or touch the database. The poll is mandatory, not belt-and-braces: the
+  shutdown response only means "accepted", the unload still runs afterwards, and killing
+  the backend window during that window would cancel the unload.
+- PowerShell files carrying Chinese text should be saved **with a UTF-8 BOM**.
+  `run.cmd` prefers `pwsh` but falls back to Windows PowerShell 5.1, and 5.1 misreads
+  BOM-less UTF-8 as ANSI when the system code page is not UTF-8 (it is 1252 here).
+  `run.ps1` is currently BOM-less and only works because `pwsh` is what runs it.
+- The launch scripts may only *start* things and *read* status: never `taskkill`, never
+  unload or load models beyond the documented warm-up, never touch `apps/server/data/`.
 
 ## Current code map
 
@@ -334,6 +369,7 @@ Documentation boundaries).
 | Path | Responsibility | Impl note |
 |---|---|---|
 | `run.ps1` / `run.cmd` | One-click launch: preflight, install/build, LM Studio probe, start, open browser | `runtime-and-config` |
+| `shutdown.ps1` | Programmatic shutdown: POST `/api/shutdown`, then poll until the backend is gone | `runtime-and-config` |
 | `apps/server/src/index.ts` | Process entry: direct-run guard, signal handlers | `runtime-and-config` |
 | `apps/server/src/bootstrap.ts` | Startup order: DB init → LM Studio startup → HTTP listen (§3.3) | `runtime-and-config` |
 | `apps/server/src/config.ts` | Environment-driven configuration (§11) | `runtime-and-config` |
@@ -347,15 +383,16 @@ Documentation boundaries).
 | `apps/server/src/db/index.ts` | Connection, schema, migrations, `meta` access (§4) | `collections-and-db` |
 | `apps/server/src/db/sqlite.ts` | `node:sqlite` adapter exposing the better-sqlite3-shaped surface | `collections-and-db` |
 | `apps/server/src/lmstudio/adapter.ts` | OpenAI-compatible client; the only LM Studio HTTP caller | `lmstudio-lifecycle` |
-| `apps/server/src/lmstudio/process.ts` | `LMStudioProcessManager`: startup, ownership, shutdown, warm-up | `lmstudio-lifecycle` |
+| `apps/server/src/lmstudio/process.ts` | `LMStudioProcessManager`: startup, warm-up, and model unloading (§6.3, §6.4) | `lmstudio-lifecycle` |
 | `apps/server/src/lmstudio/locate.ts` | Locating `lms.exe` / `LM Studio.exe` (§6.2) | `lmstudio-lifecycle` |
-| `apps/server/src/lmstudio/winProcess.ts` | Port→PID lookup, process-name verification, `taskkill` | `lmstudio-lifecycle` |
+| `apps/server/src/lmstudio/lmsCli.ts` | Bounded `lms` child-process runner plus `lms ps --json` parsing (§6.4) | `lmstudio-lifecycle` |
+| `apps/server/src/lmstudio/winProcess.ts` | Port→PID lookup, process-name verification, `taskkill` — **retained but not called since §6.4 stopped process termination; ask the user before removing** | `lmstudio-lifecycle` |
 | `apps/web/src/` | React + Vite single-page client (§9), including `preferences.ts` (localStorage) | `web-client` |
 | `apps/server/public/` | Vite build output served by Express (generated; do not edit) | `web-client` |
 | `packages/contracts/src/index.ts` | Shared REST/SSE contract types and constants | `translation-and-sse` / `web-client` |
 | `vitest.config.ts` / `vitest.e2e.config.ts` | Default (mock) and real-model E2E suite configs | `testing-and-mock` |
 | `tests/mock-lmstudio/` | Mock OpenAI-compatible server with fault injection (§8) | `testing-and-mock` |
-| `tests/helpers/` | Test harness: context factory, HTTP/SSE assertions, scratch paths, safe-port listener | `testing-and-mock` |
+| `tests/helpers/` | Test harness: context factory, HTTP/SSE assertions, scratch paths + cleanup, safe-port listener | `testing-and-mock` |
 | `tests/unit/` | Service- and adapter-level tests | `testing-and-mock` |
 | `tests/server/` | HTTP/SSE integration tests | `testing-and-mock` |
 | `tests/ui/` | Front-end component/hook tests (jsdom, run by `pnpm test`) | `web-client` / `testing-and-mock` |

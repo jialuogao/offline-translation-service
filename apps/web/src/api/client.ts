@@ -9,7 +9,6 @@ export type ApiErrorCode =
   | 'COLLECTION_NOT_FOUND'
   | 'TRANSLATION_IN_FLIGHT'
   | 'LMSTUDIO_UNAVAILABLE'
-  | 'LMSTUDIO_NOT_OWNED'
   | 'INTERNAL_ERROR';
 
 /** 一次请求的失败结果：HTTP 错误、网络错误或响应不可解析。 */

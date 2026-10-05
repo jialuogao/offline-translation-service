@@ -61,6 +61,19 @@ export interface EntryPage {
   pageSize: number;
 }
 
+/** DESIGN.md §5.2 `POST /api/entries`：不翻译直接写库的条目请求体。 */
+export interface CreateEntryRequest {
+  collection_id: string;
+  text: string;
+  source_lang: Lang;
+  target_lang: Lang;
+}
+
+/** DESIGN.md §5.2 `POST /api/entries` 的响应：新创建的条目。 */
+export interface CreateEntryResponse {
+  entry: Entry;
+}
+
 /** DESIGN.md §5.2 `POST /api/entries/batch-delete`。 */
 export interface BatchDeleteRequest {
   ids: string[];
@@ -97,12 +110,15 @@ export interface ApiError {
   message: string;
 }
 
-/** DESIGN.md §5.4 `GET /api/lmstudio/status`。 */
+/**
+ * DESIGN.md §5.4 `GET /api/lmstudio/status`。
+ *
+ * `startedByUs` 与 `pid` 已于 2026-10-05 删除：§6.4 取消了所有基于归属的进程
+ * 终止决策，记录的 PID 又是短命 CLI（`lms server start`）的，无诊断价值。
+ */
 export interface LmStudioStatus {
   running: boolean;
-  startedByUs: boolean;
   modelLoaded?: string;
-  pid?: number;
 }
 
 /** DESIGN.md §5.4 `GET /api/lmstudio/models`。 */
@@ -110,14 +126,32 @@ export interface LmStudioModelsResponse {
   models: string[];
 }
 
-/** DESIGN.md §5.4 `POST /api/shutdown`。 */
-export interface ShutdownRequest {
-  closeLmStudio?: boolean;
-}
+/**
+ * DESIGN.md §5.4 `POST /api/shutdown`。
+ *
+ * 请求体已清空：原 `closeLmStudio` 决定是否终止 LM Studio，而 §6.4 规定
+ * 服务器恒定保持运行，没有可选项。
+ */
+export type ShutdownRequest = Record<string, never>;
 
-/** DESIGN.md §5.4 `POST /api/lmstudio/shutdown`。 */
-export interface LmStudioShutdownRequest {
-  force?: boolean;
+/**
+ * DESIGN.md §5.4 `POST /api/lmstudio/unload`（原 `POST /api/lmstudio/shutdown`）。
+ *
+ * 无请求体：卸载目标固定为 `LMSTUDIO_MODEL` 及其全部实例，无需归属确认，
+ * 因此原先的 409 / `{ force: true }` 流程一并删除。
+ */
+export type LmStudioUnloadRequest = Record<string, never>;
+
+/**
+ * DESIGN.md §5.4 `POST /api/lmstudio/unload` 响应。
+ *
+ * `residual` 非空表示复核后仍有目标实例驻留——即内存**没有**被释放，
+ * 调用方（界面/日志）应据此提示，而不是当作成功。
+ */
+export interface LmStudioUnloadResponse extends OkResponse {
+  unloaded: string[];
+  residual?: string[];
+  reason?: string;
 }
 
 /** DESIGN.md §5.4 `{ ok: boolean }`。 */
@@ -142,8 +176,6 @@ export const ERROR_CODES = {
   translationInFlight: 'TRANSLATION_IN_FLIGHT',
   /** LM Studio 不可达或调用失败（§6.5）。 */
   lmstudioUnavailable: 'LMSTUDIO_UNAVAILABLE',
-  /** 外部 LM Studio 非本会话启动，需带 force 重试（§5.4）。 */
-  lmstudioNotOwned: 'LMSTUDIO_NOT_OWNED',
   /** 未预期的服务端错误。 */
   internal: 'INTERNAL_ERROR',
   /** 请求体不是合法 JSON。 */

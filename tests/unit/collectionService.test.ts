@@ -5,21 +5,24 @@ import {
   CollectionService,
   DEFAULT_COLLECTION_NAME,
 } from '../../apps/server/src/services/collectionService.js';
-import { scratchDir } from '../helpers/paths.js';
+import { scratchDir, removeDbFiles } from '../helpers/paths.js';
 
 /** CollectionService 单元测试（DESIGN.md §4 / §5.1 / §5.2）。 */
 
 let db: Db;
 let service: CollectionService;
+let dbPath: string;
 
 beforeEach(() => {
-  const dbPath = path.join(scratchDir('unit'), `collections-${Date.now()}-${Math.random()}.db`);
+  dbPath = path.join(scratchDir('unit'), `collections-${Date.now()}-${Math.random()}.db`);
   db = openDb(dbPath);
   service = new CollectionService(db);
 });
 
 afterEach(() => {
   if (db.open) db.close();
+  // 每个用例一份独立 DB；不删的话 `.temp/tests/unit/` 会随每次 `pnpm test` 累积。
+  removeDbFiles(dbPath);
 });
 
 function insert(collectionId: string, source = '你好', target = 'EN[你好]'): string {

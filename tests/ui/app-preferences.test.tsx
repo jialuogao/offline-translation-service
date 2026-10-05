@@ -82,7 +82,7 @@ function installFetch(serverActiveId: string): Harness {
       return json({ items: [], total: 0, page: 1, pageSize: 50 });
     }
     if (path === '/api/lmstudio/status') {
-      return json({ running: true, startedByUs: false, modelLoaded: 'fake-model' });
+      return json({ running: true, modelLoaded: 'fake-model' });
     }
     throw new Error(`未预期的请求：${method} ${path}`);
   }) as typeof fetch;
