@@ -21,9 +21,9 @@ not preserve the investigation narrative.
   data model, API and SSE contracts, LM Studio lifecycle decisions, and test
   strategy. It governs approved intent.
 - Source code, tests, and package scripts establish what is currently
-  implemented and how it is verified. Implementation has not started yet, so
-  there is no such evidence at present: do not describe planned behavior as
-  implemented merely because it appears in `DESIGN.md`.
+  implemented and how it is verified. The application is implemented, so verify a
+  claim against the code or a test before recording it; do not describe planned
+  behavior as implemented merely because it appears in `DESIGN.md`.
 - When these sources disagree, record the concrete discrepancy and resolve it
   according to the user's request. Do not silently make a stale document or
   implementation authoritative.
@@ -131,12 +131,11 @@ When relevant to the session, capture verified facts about:
   real translated text, credentials, database files, or machine-specific
   absolute paths. Prefer relative paths in durable notes.
 
-Implementation has not started. Record a mechanism here only once code or a test
-demonstrates it; until then the governing statement lives in `DESIGN.md`. Do not
-present the milestones or open items of §12 and §13 as current features, and do
-not weaken the locked decisions. If an approved decision itself changes, update
-the relevant section of `DESIGN.md` and align `AGENTS.md` or `README.md` only
-where their guidance is affected.
+Record a mechanism here only once code or a test demonstrates it; otherwise the
+governing statement lives in `DESIGN.md`. Do not present the milestones or open
+items of §12 and §13 as pending work, and do not weaken the locked decisions. If
+an approved decision itself changes, update the relevant section of `DESIGN.md`
+and align `AGENTS.md` or `README.md` only where their guidance is affected.
 
 ## Process
 
@@ -175,11 +174,11 @@ and report the blocker.
 
 ## Project verification references
 
-Implementation has not started, so no scripts exist yet. When they are added,
-record the real command names in `AGENTS.md` and `README.md` and use those here
-instead of commands or test conventions from another stack. `DESIGN.md` §2
-specifies **pnpm** at the workspace root and **Vitest** for tests, with the mock
-LM Studio under `tests/mock-lmstudio` (§8).
+`AGENTS.md` ("Tests and verification") is the authority for the real command
+names and for the sandbox boundary; read it rather than relying on a copy here.
+In short: **pnpm** at the workspace root, **Vitest** for tests, the mock LM
+Studio under `tests/mock-lmstudio` (`DESIGN.md` §8), `pnpm test:e2e` for the
+opt-in real-model suite, and `pnpm typecheck` / `pnpm build` as the other gates.
 
 - Regression coverage must not require a real LM Studio instance, a downloaded
   model, or Internet access. Cover the §8.3 cases, including mid-stream

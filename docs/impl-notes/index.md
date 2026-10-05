@@ -23,7 +23,8 @@ disagree, the code is right and the note is stale — fix it here.
 | `apps/server/src/services/translationService.ts` | `translation-and-sse` |
 | `apps/server/src/routes/*`, `apps/server/src/http/*` | `translation-and-sse` |
 | `apps/web/src/*` | `web-client` |
-| `tests/*` | `testing-and-mock` |
+| `tests/ui/*` | `web-client` (hook/render behaviour) and `testing-and-mock` (how to run and structure the DOM tests) |
+| `tests/*` (rest) | `testing-and-mock` |
 | `packages/contracts/src/index.ts` | `translation-and-sse` / `web-client` |
 
 ## Reading guide

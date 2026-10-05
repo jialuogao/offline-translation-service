@@ -36,6 +36,39 @@ The mock suite never starts a real LM Studio, never downloads a model, and needs
 network. Neither suite may write to `apps/server/data/`; every test database lives under
 `.temp/tests/` (the harness deletes the `-wal`/`-shm` sidecars with it).
 
+## UI tests (`tests/ui/`)
+
+Client-side behaviour belongs in the default suite: it must not need a model, so it runs
+under `pnpm test` alongside everything else. The files are `.tsx`, which is why
+`vitest.config.ts` includes both `tests/**/*.test.ts` and `tests/**/*.test.tsx`.
+
+- `translator.test.tsx`, `useTranslator.test.tsx` — output box rendering (position after
+  the source textarea, read-only, empty state, disabled actions) and the streaming state
+  machine.
+- `preferences.test.ts` — preference validation, key versioning, fault tolerance.
+- `preferences-hooks.test.tsx` — restore-on-mount, persist-on-change, no first-frame
+  overwrite.
+- `app-preferences.test.tsx` — `App`-level restore behaviour against a stub JSON API.
+
+Two constraints shape how these are written:
+
+- **A `fetch`-stubbing hook test stays out of jsdom.** jsdom gives `AbortSignal` a copy from
+  its own realm, and Node's `fetch` refuses a foreign-realm signal
+  (`Expected signal ("AbortSignal {}") to be an instance of AbortSignal`). That looks like
+  "the translate request failed" but is purely an artefact of mixing realms, so
+  `useTranslator.test.tsx` mocks the SSE client (`vi.mock('.../api/translate')`) in jsdom and
+  the real HTTP/SSE path stays covered by `tests/server/translate.test.ts` and
+  `tests/unit/adapter.test.ts`. Do not "fix" this by stubbing `AbortController`.
+- **App-level tests stub the JSON API, never the model.** `app-preferences.test.tsx`
+  installs a `fetch` replacement that answers the collection/status endpoints, avoids the
+  streaming route entirely, and matches the list DOM (`.collection-item.active` and
+  `.collection-main` are the hooks the collection tests rely on).
+- Rendering tests use `createRoot` + `act` with
+  `globalThis.IS_REACT_ACT_ENVIRONMENT = true`; without that flag React logs an `act(...)`
+  warning on every render. `vitest.config.ts` also sets `resolve.dedupe: ['react',
+  'react-dom']`, because React otherwise resolves twice (repository root and `apps/web`) and
+  hooks fail with `Cannot read properties of null (reading 'useState')`.
+
 ### Sandbox boundary on this machine
 
 Vitest/Vite run esbuild's service as a child process with **piped stdio**, which this

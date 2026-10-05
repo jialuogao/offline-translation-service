@@ -202,6 +202,9 @@ SQLite 单文件 `data/translations.db`。时间戳存为 ISO 8601 字符串（U
 
 `Entry = { id, collection_id, source_lang, target_lang, source_text, target_text, model_id, created_at }`
 
+- `pageSize` 默认 50、上限 200；非法值回退默认（不在候选集内的一律按默认处理）。
+- 前端把每页条数作为界面偏好暴露（20 / 50 / 100 / 200），改动后回到第一页并记住选择（见 §9.5）。
+
 ### 5.3 翻译（流式）
 
 | 方法 | 路径 | 说明 |
@@ -418,8 +421,8 @@ User：原文原文文本（按段落原样）。
 ### 9.1 页面结构
 
 - 左栏：合集列表（可新建、切换、重命名、删除）。
-- 右栏：当前合集的翻译区——顶部输入框 + 方向切换 + "翻译"按钮；下方历史列表。
-- 历史列表项：原文 / 译文 / 时间 / 删除勾选框；流式翻译时最新一条实时增长。
+- 右栏：当前合集的翻译区——顶部输入框 + 方向切换 + "翻译"按钮；**输入框正下方是"译文"输出框**（流式实时增长，完成后保留，可复制/清空）；再下方是历史列表。
+- 历史列表项：原文 / 译文 / 时间 / 删除勾选框；流式翻译时最新一条实时增长（与输出框是同一份状态的两处展示）。
 
 ### 9.2 多选删除（Shift / Ctrl）
 
@@ -442,6 +445,24 @@ User：原文原文文本（按段落原样）。
 - 后端 `/api/translate/stream` 对同一 `collection_id` 检测到已有在飞请求时返回 `409 { error: "TRANSLATION_IN_FLIGHT" }`。
 - 不同合集可并发（用户切到另一合集发起翻译不阻塞前一个），但 SSE 连接总数应有上限（实现取 `MAX_CONCURRENT_STREAMS`，默认 4；超出时返回 `409 TRANSLATION_IN_FLIGHT`）。
 - 流式中途客户端断开：后端检测到连接关闭应取消上游 LM Studio 请求（abort），不落库——符合 §5.3"只在 done 时写入"。
+
+### 9.5 界面偏好记忆
+
+纯界面选择（**不含**原文、译文、历史等内容）记在浏览器 localStorage，key 形如
+`ots:pref:v1:<name>`，带版本号；读取时按候选集校验，损坏/过期/非法值一律回退默认；
+localStorage 不可用（隐私模式、被策略禁用、配额满）时静默降级，不影响页面可用。
+
+| 偏好 | key | 默认 |
+| --- | --- | --- |
+| 翻译方向 | `source-lang` | `zh`（中→英） |
+| 历史每页条数 | `entries-page-size` | 50（可选 20/50/100/200） |
+| 上次选中的合集 | `active-collection` | 无（跟随服务端 active） |
+
+当前合集同时存在两处：服务端 `meta.active_collection_id`（§4.1，权威）与浏览器记忆。
+加载时若两者不一致，前端补一次切换让本浏览器回到上次的选择；用户一旦自己点过合集就不再
+自动切换；记忆中的合集已被删除时忽略并清除该记忆。
+
+原文、译文输出框内容、流式状态、勾选状态**不持久化**：属于用户内容，且历史已在服务端落库。
 
 ---
 
@@ -470,17 +491,21 @@ offline-translation-service/
 │  └─ web/                      # 前端 Vite + React
 │     ├─ src/
 │     │  ├─ main.tsx / App.tsx / styles.css / format.ts
-│     │  ├─ components/         # CollectionList, Translator, HistoryList, StatusBar, ConfirmDialog
-│     │  ├─ hooks/              # useCollections, useEntries, useMultiSelect, useLmStudioStatus, useTranslator
+│     │  ├─ preferences.ts      # localStorage 偏好读写（版本化 key + 校验 + 容错）
+│     │  ├─ components/         # CollectionList, Translator, OutputBox, HistoryList, StatusBar, ConfirmDialog
+│     │  ├─ hooks/              # useCollections, useEntries, useMultiSelect, useLmStudioStatus, useTranslator, usePersistent{Enum,Number}
 │     │  └─ api/                # client.ts（fetch 封装）、translate.ts（POST SSE 解析）
 │     └─ index.html
 ├─ packages/contracts/          # 共享契约类型（client/server）
 ├─ tests/
 │  ├─ mock-lmstudio/            # Mock OpenAI 兼容服务（含故障注入）
-│  ├─ helpers/                  # 测试装配、HTTP/SSE 断言、scratch 路径
+│  ├─ helpers/                  # 测试装配、HTTP/SSE 断言、scratch 路径、安全端口监听
 │  ├─ unit/                     # 服务与 adapter 单测
-│  └─ server/                   # 后端集成测试
+│  ├─ server/                   # 后端集成测试
+│  ├─ ui/                       # 前端组件/hook 测试（jsdom，随 pnpm test 一起跑）
+│  └─ e2e/                      # 真实 LM Studio 端到端测试（单独 pnpm test:e2e）
 ├─ docs/                        # 使用指南与实现笔记（见 AGENTS.md 的文档边界）
+├─ run.ps1 / run.cmd            # 一键启动脚本
 ├─ DESIGN.md                    # 本文档
 ├─ AGENTS.md                    # 实现指引（由实现 agent 维护）
 └─ package.json                 # pnpm workspace 根
@@ -521,8 +546,12 @@ offline-translation-service/
 3. **M3 流式**：SSE 双端打通（前端手写 `fetch` + `ReadableStream` 解析）。✅
 4. **M4 历史与多选删除**：entries CRUD + Shift/Ctrl 多选 + 批量删除 + 清空合集。✅
 5. **M5 LM Studio 生命周期**：启动探测、spawn + PID、关闭归属判定、前端确认弹窗、模型预热。✅
-6. **M6 Mock + 回归测试**：Mock 服务（含故障注入）+ §8.3 全部用例（96 个测试，`pnpm test`）。✅
+6. **M6 Mock + 回归测试**：Mock 服务（含故障注入）+ §8.3 全部用例（`pnpm test`，当前 140+ 个用例；真实模型的 E2E 单独跑 `pnpm test:e2e`）。✅
 7. **M7 打磨**：错误态 / 空态 / 加载态 UI、二次确认、服务已关闭横幅。✅
+
+后续增强（不在 M1–M7 范围）：L6/M7 之后新增了**译文输出框**（输入框下方，流式实时增长）与
+**界面偏好记忆**（翻译方向、历史每页条数、上次选中的合集，存 localStorage）；列表页数可选择
+20/50/100/200。
 
 已核实的实现细节记在 `docs/impl-notes/`，使用说明见 `docs/usage.md`。
 

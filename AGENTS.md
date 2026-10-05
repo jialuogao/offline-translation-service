@@ -285,12 +285,13 @@ exact operation; if it is unavailable or refused, stop and report the blocker.
 
 ## Local skills
 
-- [repo-governance-bootstrap](.agents/skills/repo-governance-bootstrap/SKILL.md):
-  bootstrap or audit repository instructions, documentation boundaries, local
-  artifact rules, and consolidation skills; compare other repositories for
-  verified, transferable patterns.
 - [consolidate-note](.agents/skills/consolidate-note/SKILL.md): consolidate
   durable session findings into this repository's documentation.
+
+Only the skills that actually live in this repository are listed here. A skill that
+is available from a global or personal location may be used when it exists, but do
+not link it to a repository-relative path: a link that does not resolve is worse
+than no link. Add a skill directory to `.agents/skills/` before referencing it here.
 
 When reusing a mature skill from another repository, compare candidates first,
 copy the best-fitting skill directory intact, then make only evidence-backed
@@ -349,10 +350,13 @@ Documentation boundaries).
 | `apps/server/src/lmstudio/process.ts` | `LMStudioProcessManager`: startup, ownership, shutdown, warm-up | `lmstudio-lifecycle` |
 | `apps/server/src/lmstudio/locate.ts` | Locating `lms.exe` / `LM Studio.exe` (§6.2) | `lmstudio-lifecycle` |
 | `apps/server/src/lmstudio/winProcess.ts` | Port→PID lookup, process-name verification, `taskkill` | `lmstudio-lifecycle` |
-| `apps/web/src/` | React + Vite single-page client (§9) | `web-client` |
+| `apps/web/src/` | React + Vite single-page client (§9), including `preferences.ts` (localStorage) | `web-client` |
 | `apps/server/public/` | Vite build output served by Express (generated; do not edit) | `web-client` |
 | `packages/contracts/src/index.ts` | Shared REST/SSE contract types and constants | `translation-and-sse` / `web-client` |
+| `vitest.config.ts` / `vitest.e2e.config.ts` | Default (mock) and real-model E2E suite configs | `testing-and-mock` |
 | `tests/mock-lmstudio/` | Mock OpenAI-compatible server with fault injection (§8) | `testing-and-mock` |
-| `tests/helpers/` | Test harness: context factory, HTTP/SSE assertions, scratch paths | `testing-and-mock` |
+| `tests/helpers/` | Test harness: context factory, HTTP/SSE assertions, scratch paths, safe-port listener | `testing-and-mock` |
 | `tests/unit/` | Service- and adapter-level tests | `testing-and-mock` |
 | `tests/server/` | HTTP/SSE integration tests | `testing-and-mock` |
+| `tests/ui/` | Front-end component/hook tests (jsdom, run by `pnpm test`) | `web-client` / `testing-and-mock` |
+| `tests/e2e/` | Real LM Studio end-to-end tests (opt-in, `pnpm test:e2e`) | `testing-and-mock` |

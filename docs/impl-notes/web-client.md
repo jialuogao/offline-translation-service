@@ -90,6 +90,32 @@ Rules that keep this safe and unsurprising:
   state, and selection. The output box and source text are user content, and the translation
   itself is already durably stored server-side.
 
+### Page-size effect in `useEntries`
+
+`useEntries(collectionId, pageSize, onError)` takes the page size as a prop instead of a
+constant, so the preference drives pagination. `ENTRIES_PAGE_SIZE` (50) is only the
+default, and `ENTRIES_PAGE_SIZE_OPTIONS` is the allow-list shared with the preference.
+
+Three behaviours that are easy to break in this effect and are therefore deliberate:
+
+- The effect is keyed on `[collectionId, pageSize, load]` and every run reloads **page 1**,
+  because a changed collection or page size makes the old page number meaningless. `page`
+  is read for the "is a reset needed?" decision but is **not** in the dependency list —
+  adding it would turn every `setPage` into a second fetch.
+- The previous-page-size comparison happens **before** `pageSizeRef` is updated. Comparing
+  after the assignment makes the condition always false, so a page-size change would never
+  reset the page.
+- The pref hydration path (`usePersistentNumber` swapping the default for the stored value
+  right after mount) must not cause a duplicate first fetch; that is the reason the effect
+  is not keyed on `pageSize` alone.
+
+`onError` is held in a ref so a new callback identity cannot trigger a refetch, and
+`load` takes an explicit `pageSize` argument so it has an empty dependency list.
+
+Regression tests: `tests/ui/preferences-hooks.test.tsx` covers hydration semantics, and the
+page-size request path is asserted end to end by `tests/server/api.test.ts`
+(`pageSize=20`/`200` honoured, junk falls back to 50 via `§5.2 分页参数非法时回退到默认值`).
+
 ### Active collection across reloads
 
 The backend already persists the active collection (`meta.active_collection_id`,
