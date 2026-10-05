@@ -12,10 +12,10 @@ export interface TranslatorProps {
   onDirectionChange: (sourceLang: Lang, targetLang: Lang) => void;
   onTranslate: () => void;
   onCancel: () => void;
-  /** 清空原文输入框（不影响任何记录）。 */
+  /** 清空原文输入框与译文输出（不影响任何记录）。 */
   onClearSource: () => void;
   /** 不翻译直接写库：把当前原文按原样存入历史。 */
-  onSaveDirect: () => void;
+  onSaveDirect: () => void | Promise<void>;
   translating: boolean;
   /** 未选合集、服务已关闭等情况下整体禁用。 */
   disabled: boolean;
@@ -53,6 +53,15 @@ export function Translator({
 }: TranslatorProps): JSX.Element {
   const tooLong = sourceText.length > maxChars;
   const canTranslate = !disabled && !translating && !tooLong && sourceText.trim() !== '';
+
+  const handleClearSource = (): void => {
+    onClearSource();
+    onClearOutput();
+  };
+
+  const handleSaveDirect = (): void => {
+    void Promise.resolve(onSaveDirect()).then(onClearOutput);
+  };
 
   return (
     <section className="panel translator">
@@ -111,16 +120,16 @@ export function Translator({
           <button
             type="button"
             className="btn btn-mini"
-            onClick={onClearSource}
+            onClick={handleClearSource}
             disabled={disabled || sourceText === ''}
-            title="清空原文输入框，不影响任何记录"
+            title="清空原文输入与译文输出，不影响历史记录"
           >
             清空
           </button>
           <button
             type="button"
             className="btn"
-            onClick={onSaveDirect}
+            onClick={handleSaveDirect}
             disabled={disabled || translating || sourceText.trim() === '' || tooLong}
             title="不翻译，把当前原文按原样直接存入当前合集的历史"
           >

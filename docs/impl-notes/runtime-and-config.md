@@ -99,6 +99,39 @@ Verified details:
 - `closeResources` closes SQLite **before** the process exits, which flushes WAL.
 - Exit codes: `0` via HTTP, `130` on SIGINT, `143` on SIGTERM.
 
+## SIGINT reaches the handler but usually cannot finish
+
+`index.ts` registers `SIGINT`/`SIGTERM` and they **do** arrive — the log always contains
+`收到 SIGINT，开始关闭`. But under `run.ps1`'s launch path the unload does not complete.
+
+Measured by broadcasting `CTRL_C_EVENT` to the backend's console:
+
+| Launch path | Backend exit | Model actually unloaded |
+|---|---|---|
+| `node` directly (sole process in the console) | 373 ms | yes, log complete |
+| `pnpm.cmd start`, model not resident | 307 ms | no — log stops after the SIGINT line |
+| `pnpm.cmd start`, model resident | **3–6 ms** | no — `lms ps` still lists it |
+
+`CTRL_C_EVENT` is broadcast to the whole console. `cmd.exe`, seeing Ctrl+C inside a batch
+file, prints `Terminate batch job (Y/N)?` and terminates the batch job — the child tree
+included. The backend dies mid-`await` instead of finishing `unload()`.
+
+Three consequences worth remembering:
+
+- **A second Ctrl+C does not help.** It cannot make `cmd.exe` finish the job any faster, and
+  the backend's own idempotency guard (`if (this.shuttingDown) return`) discards the second
+  SIGINT outright.
+- **No process can survive this from outside.** Anything that resolves a PID and kills a
+  tree has the same effect, which is why the HTTP path exists: it makes the backend
+  terminate itself, with no external actor able to interrupt the middle of the sequence.
+- **Data survives.** Skipping `db.close()` only skips the WAL checkpoint. A `taskkill /F`
+  kill followed by reopening the database returned identical row counts and content, and
+  entries are only written on `done`, so no half-written record can exist.
+
+The signal path is still worth keeping: it is the only graceful mechanism when the backend
+is started directly with `node`, and it is what makes a debugging session (`Ctrl+C` in the
+terminal) leave the database tidy.
+
 The ownership-based shutdown this replaced (kill by recorded PID, `closeLmStudio`,
 409 + `force`) is history; see [lmstudio-lifecycle.md](lmstudio-lifecycle.md) for why it
 was abandoned.
@@ -120,18 +153,27 @@ cmd.exe (/c pnpm.CMD start)        <- owns the console window
 ```
 
 `node` exits → both `pnpm` layers return → the batch files end → `cmd.exe` exits → the
-console host tears the window down. Nothing detaches, so nothing survives.
+console host tears the window down. Nothing detaches, so in the normal case nothing
+survives.
 
 This is what lets `shutdown.ps1` stay a **pure HTTP wrapper**: it needs no PID file, no
 window matching and no process termination of any kind. An earlier design considered
 writing a PID file so the shutdown script could close the window explicitly; measuring
 the chain showed that is unnecessary.
 
-Two consequences worth remembering:
+**It is not, however, 100% reliable.** Across seven measured start/stop cycles, six left
+the chain fully clean and **one left the top four processes stuck** (both `pnpm` layers
+and both `cmd` wrappers, with the launcher `cmd` holding the window). They did not exit
+within 30 s and needed `Stop-Process` by PID. The port was released either way, because
+the backend process itself had exited correctly. `shutdown.ps1` deliberately cannot
+clean this up — it is forbidden from touching processes — so a caller that re-runs
+`run.ps1` may occasionally find an orphan window. Closing it is enough.
 
-- It only holds because the backend exits **normally**. Killing the process tree by hand
-  drops the window but skips the unload and the database close; pressing the window's X
-  skips both.
+Two more consequences worth remembering:
+
+- The chain only winds down cleanly because the backend exits **normally**. Killing the
+  process tree by hand drops the window but skips the unload and the database close;
+  pressing the window's X skips both.
 - `run.ps1` has no switch to hide that window, by decision — for an unattended caller the
   window stays visible until the service exits. See `docs/usage.md`.
 

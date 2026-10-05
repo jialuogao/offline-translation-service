@@ -20,6 +20,16 @@ src/
 Two columns: collections on the left, translator plus history on the right, with a
 status bar carrying the LM Studio state and the shutdown actions.
 
+Responsive layout is implemented in `src/styles.css`:
+
+- At widths up to 860px, the columns stack and the app returns to document-height
+  scrolling instead of dividing the viewport height among all panels. The history panel
+  keeps a minimum height and its list scrolls internally, capped at 55vh.
+- At widths up to 600px, history rows become labeled vertical layouts: the table header
+  and timestamps are hidden, while checkbox, source, target, direction, and row action
+  get dedicated grid areas. Header actions use their own full-width row and pagination
+  wraps, avoiding squeezed table columns and controls.
+
 ## POST SSE parsing (`api/translate.ts`)
 
 `EventSource` cannot be used — the endpoint needs POST. The parser reads the response
@@ -151,7 +161,9 @@ forgotten; clicking a collection writes the memory) and `tests/ui/preferences.te
 - **The output box below the input (`components/OutputBox.tsx`) is the primary place the
   translation is read.** During streaming it shows the accumulated deltas; after `done`
   it keeps the final text and adds a 已保存到历史 badge plus the model id. It has 复制 /
-  清空 actions; 清空 only clears the box and never touches history.
+  清空 actions; 清空 only clears the box and never touches source input or history.
+  Clearing source input also clears the output. Direct-save clears the output after its
+  async callback settles; `App` clears source input after `useEntries.addEntry` settles.
   - **The box auto-grows with its content.** On every `text` change an effect sets the
     textarea height to its `scrollHeight` (reset to `auto` first, so it shrinks back to
     `min-height` when cleared). The CSS has **no `max-height` cap** and `overflow: hidden`
@@ -169,19 +181,31 @@ forgotten; clicking a collection writes the memory) and `tests/ui/preferences.te
 
 The source-input footer has two actions beyond 翻译 / 取消翻译:
 
-- **清空** clears the source textarea only; it never touches history. Disabled when the
-  input is empty.
+- **清空** clears the source textarea and output box; it never touches history. Disabled
+  when the input is empty. The output box's own 清空 action remains independent and leaves
+  source input unchanged.
 - **直接存历史** posts the input verbatim to `POST /api/entries` (no LM Studio involved)
-  and, on success, clears the input for fast consecutive notes. `App` keeps this as a
-  separate `handleSaveDirect` calling `useEntries.addEntry(text, sourceLang, targetLang)`,
-  then reloads collection counts. It is disabled while a translation is in flight, when
-  the input is empty/over-limit, or when the service is down.
+  and clears both input and output after the async save callback settles, for fast
+  consecutive notes. `App` keeps this as a separate `handleSaveDirect` calling
+  `useEntries.addEntry(text, sourceLang, targetLang)`, then reloads collection counts.
+  `Translator` clears the output after that callback resolves. It is disabled while a
+  translation is in flight, when the input is empty/over-limit, or when the service is
+  down.
 
 The backend writes `source_text = target_text = text` with `model_id = null`, so a note
 appears identically in both history columns (contract: `DESIGN.md` §5.2). Covered by
-`tests/ui/translator.test.tsx` (清空 triggers `onClearSource`; 直接存历史 triggers
-`onSaveDirect`, disabled when empty) and `tests/server/api.test.ts`
+`tests/ui/translator.test.tsx` (清空 checks source/output independence and direct-save
+output clearing; 直接存历史 is disabled when empty) and `tests/server/api.test.ts`
 (`POST /api/entries` writes the row and 400s on empty text / bad direction).
+
+### Delete confirmation
+
+All destructive collection/history actions are routed from `App` through the shared
+`ConfirmDialog`: delete one entry, batch-delete selected entries, clear a collection, or
+delete a collection. `HistoryList` reports a single-entry delete request to `App`; it
+does not call `useEntries.deleteEntry` directly. The single-entry prompt is covered by
+`tests/ui/multiselect.test.tsx` (`删除单条历史记录前要求确认`); multi-select behavior and
+the batch-delete action bar are covered in the same suite.
 
 ### `useTranslator` state contract
 

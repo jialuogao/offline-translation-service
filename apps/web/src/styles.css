@@ -697,16 +697,118 @@ h2 {
 }
 
 @media (max-width: 860px) {
-  .layout {
-    grid-template-columns: minmax(0, 1fr);
+  .app {
+    height: auto;
+    min-height: 100%;
   }
 
-  .history-head,
-  .history-row {
-    grid-template-columns: 30px minmax(0, 1fr) minmax(0, 1fr) 60px 60px;
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+    flex: initial;
+    min-height: auto;
+  }
+
+  .main-column {
+    min-height: auto;
+  }
+
+  .history {
+    flex: initial;
+    min-height: 320px;
+  }
+
+  .history-list {
+    min-height: 220px;
+    max-height: 55vh;
   }
 
   .cell-time {
     display: none;
+  }
+}
+
+@media (max-width: 600px) {
+  .layout {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .panel {
+    padding: 10px;
+  }
+
+  .history > .panel-header {
+    gap: 8px;
+  }
+
+  .history .panel-header-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+
+  .selection-bar {
+    flex-wrap: wrap;
+  }
+
+  .history-head {
+    display: none;
+  }
+
+  .history-row {
+    grid-template-columns: 28px minmax(0, 1fr) 52px;
+    grid-template-areas:
+      'check source action'
+      'check target action'
+      'check direction action';
+    gap: 6px 8px;
+    padding: 10px 6px;
+  }
+
+  .cell-check {
+    grid-area: check;
+    align-self: center;
+  }
+
+  .cell-source {
+    grid-area: source;
+  }
+
+  .cell-target {
+    grid-area: target;
+  }
+
+  .cell-source::before,
+  .cell-target::before {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+
+  .cell-source::before {
+    content: '原文';
+  }
+
+  .cell-target::before {
+    content: '译文';
+  }
+
+  .cell-direction {
+    grid-area: direction;
+  }
+
+  .cell-action {
+    grid-area: action;
+    align-self: center;
+  }
+
+  .pagination {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .pagination > span {
+    text-align: center;
   }
 }

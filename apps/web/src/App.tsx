@@ -179,20 +179,33 @@ export function App(): JSX.Element {
    * 不翻译直接写库：把原文按原样存入当前合集的历史（DESIGN.md §5.2 扩展，§9.1）。
    * 常见场景是记录不需要翻译的中文注释或中间信息。
    */
-  const handleSaveDirect = useCallback((): void => {
+  const handleSaveDirect = useCallback(async (): Promise<void> => {
     const collection = collections.active;
     const text = sourceText.trim();
     if (collection === null || translator.translatingFor(collection.id) || text === '') {
       return;
     }
-    void entries
-      .addEntry(text, sourceLang, sourceLang === 'zh' ? 'en' : 'zh')
-      .then(() => {
-        // 成功写库后清空输入框，方便连续记录多条。
-        setSourceText('');
-        void collections.reload();
-      });
+    await entries.addEntry(text, sourceLang, sourceLang === 'zh' ? 'en' : 'zh');
+    // 写库完成后清空输入框，方便连续记录多条；输出框由 Translator 在此回调完成后清空。
+    setSourceText('');
+    void collections.reload();
   }, [collections, entries, sourceLang, sourceText, translator]);
+
+  const handleDeleteEntry = useCallback(
+    (id: string): void => {
+      setDialog({
+        title: '删除记录',
+        message: '确定删除这条翻译记录吗？该操作不可撤销。',
+        confirmLabel: '删除',
+        danger: true,
+        busyKey: 'delete-entry',
+        action: async () => {
+          await entries.deleteEntry(id);
+        },
+      });
+    },
+    [entries],
+  );
 
   const handleBatchDelete = useCallback((): void => {
     const ids = Array.from(selection.selectedIds);
@@ -397,9 +410,7 @@ export function App(): JSX.Element {
               onRefresh={() => {
                 void entries.refresh();
               }}
-              onDeleteEntry={(id) => {
-                void entries.deleteEntry(id);
-              }}
+              onDeleteEntry={handleDeleteEntry}
               onBatchDelete={handleBatchDelete}
               onClearCollection={handleClearCollection}
               onPageChange={entries.setPage}

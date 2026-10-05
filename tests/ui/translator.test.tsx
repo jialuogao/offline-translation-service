@@ -117,6 +117,7 @@ describe('译文输出框', () => {
   it('清空按钮触发回调', () => {
     const container = document.createElement('div');
     const onClear = vi.fn();
+    const onClearSource = vi.fn();
     const root = createRoot(container);
     act(() => {
       root.render(
@@ -128,7 +129,7 @@ describe('译文输出框', () => {
           onDirectionChange={() => undefined}
           onTranslate={() => undefined}
           onCancel={() => undefined}
-          onClearSource={() => undefined}
+          onClearSource={onClearSource}
           onSaveDirect={() => undefined}
           translating={false}
           disabled={false}
@@ -149,6 +150,16 @@ describe('译文输出框', () => {
       clearButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onClear).toHaveBeenCalledTimes(1);
+    expect(onClearSource).not.toHaveBeenCalled();
+
+    const sourceClearButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('.translator-buttons button'),
+    ).find((button) => button.textContent === '清空');
+    act(() => {
+      sourceClearButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onClearSource).toHaveBeenCalledTimes(1);
+    expect(onClear).toHaveBeenCalledTimes(2);
 
     act(() => root.unmount());
   });
@@ -204,9 +215,10 @@ describe('译文输出框', () => {
     act(() => root.unmount());
   });
 
-  it('直接存历史按钮触发 onSaveDirect，空原文时禁用', () => {
+  it('直接存历史按钮触发 onSaveDirect，空原文时禁用', async () => {
     const container = document.createElement('div');
-    const onSaveDirect = vi.fn();
+    const onSaveDirect = vi.fn(async () => undefined);
+    const onClearOutput = vi.fn();
     const root = createRoot(container);
     act(() => {
       root.render(
@@ -227,7 +239,7 @@ describe('译文输出框', () => {
           outputStreaming={false}
           outputSaved={false}
           outputModelId={null}
-          onClearOutput={() => undefined}
+          onClearOutput={onClearOutput}
         />,
       );
     });
@@ -240,7 +252,11 @@ describe('译文输出框', () => {
     act(() => {
       saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(onSaveDirect).toHaveBeenCalledTimes(1);
+    expect(onClearOutput).toHaveBeenCalledTimes(1);
 
     act(() => root.unmount());
   });

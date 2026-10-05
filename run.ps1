@@ -199,7 +199,7 @@ if ($lmReady) {
 }
 
 # ---------------------------------------------------------------- 5. 启动后端
-Write-Step '启动后端（独立窗口；关闭该窗口或按 Ctrl+C 即可停止服务）'
+Write-Step '启动后端（独立窗口；在界面点「关闭服务」可卸载模型并正常退出）'
 $env:PORT = "$Port"
 $server = Start-Process -FilePath 'pnpm.cmd' -ArgumentList @('start') -WorkingDirectory $root `
   -PassThru -WindowStyle Normal

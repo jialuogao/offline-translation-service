@@ -122,6 +122,27 @@ function selectionBarText(container: HTMLElement): string | null {
 }
 
 describe('历史列表多选（§9.2）', () => {
+  it('删除单条历史记录前要求确认', async () => {
+    const restore = installFetch();
+    const container = document.createElement('div');
+    document.body.append(container);
+    try {
+      await mountApp(container);
+      const deleteButton = rows(container)[0]?.querySelector('button');
+      act(() => {
+        deleteButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+
+      expect(container.querySelector('[role="dialog"]')?.textContent).toContain('删除记录');
+      expect(container.querySelector('[role="dialog"]')?.textContent).toContain(
+        '确定删除这条翻译记录吗？',
+      );
+    } finally {
+      document.body.removeChild(container);
+      restore();
+    }
+  });
+
   it('点击两个 checkbox 可同时选中，操作条计数为 2', async () => {
     const restore = installFetch();
     const container = document.createElement('div');
