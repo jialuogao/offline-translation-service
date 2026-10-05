@@ -189,13 +189,15 @@ The source-input footer has two actions beyond 翻译 / 取消翻译:
   consecutive notes. `App` keeps this as a separate `handleSaveDirect` calling
   `useEntries.addEntry(text, sourceLang, targetLang)`, then reloads collection counts.
   `Translator` clears the output after that callback resolves. It is disabled while a
-  translation is in flight, when the input is empty/over-limit, or when the service is
+  translation is in flight, when the input is empty/over-limit, when the output already
+  contains a translation (to avoid duplicate history entries), or when the service is
   down.
 
 The backend writes `source_text = target_text = text` with `model_id = null`, so a note
 appears identically in both history columns (contract: `DESIGN.md` §5.2). Covered by
 `tests/ui/translator.test.tsx` (清空 checks source/output independence and direct-save
-output clearing; 直接存历史 is disabled when empty) and `tests/server/api.test.ts`
+output clearing; 直接存历史 is disabled when empty or when output already contains a
+translation) and `tests/server/api.test.ts`
 (`POST /api/entries` writes the row and 400s on empty text / bad direction).
 
 ### Delete confirmation

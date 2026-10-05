@@ -130,8 +130,12 @@ export function Translator({
             type="button"
             className="btn"
             onClick={handleSaveDirect}
-            disabled={disabled || translating || sourceText.trim() === '' || tooLong}
-            title="不翻译，把当前原文按原样直接存入当前合集的历史"
+            disabled={disabled || translating || sourceText.trim() === '' || tooLong || outputText !== ''}
+            title={
+              outputText !== ''
+                ? '已有译文，避免重复存入历史'
+                : '不翻译，把当前原文按原样直接存入当前合集的历史'
+            }
           >
             直接存历史
           </button>

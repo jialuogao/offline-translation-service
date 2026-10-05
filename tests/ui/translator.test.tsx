@@ -260,4 +260,18 @@ describe('译文输出框', () => {
 
     act(() => root.unmount());
   });
+
+  it('已有译文时禁用直接存历史，避免重复记录', () => {
+    const container = document.createElement('div');
+    const root = render(container, { outputText: '已有译文' });
+
+    const saveButton = Array.from(container.querySelectorAll('.translator-buttons button')).find(
+      (button) => button.textContent === '直接存历史',
+    );
+    expect(saveButton).toBeDefined();
+    expect((saveButton as HTMLButtonElement).disabled).toBe(true);
+    expect((saveButton as HTMLButtonElement).title).toContain('避免重复');
+
+    act(() => root.unmount());
+  });
 });
