@@ -294,13 +294,22 @@ data: {"error": "LMSTUDIO_UNAVAILABLE", "message": "无法连接 LM Studio"}
 
 | 方法 | 路径 | 说明 | 请求体 | 响应 |
 | --- | --- | --- | --- | --- |
-| GET | `/api/lmstudio/status` | 探测状态 | — | `{ running: boolean, modelLoaded?: string }` |
+| GET | `/api/lmstudio/status` | 探测 LM Studio 状态 | — | `{ running: boolean, modelLoaded?: string }` |
 | GET | `/api/lmstudio/models` | 列已加载模型 | — | `{ models: string[] }` |
+| GET | `/api/service/status` | **统一健康端点**：汇报 db / storage / lmstudio 各模块状态 | — | `ServiceStatus`（见下） |
 | POST | `/api/lmstudio/unload` | **卸载模型**（不关后端、不关 LM Studio 服务器），用于释放内存而继续浏览历史 | — | `{ ok: boolean, unloaded: string[], residual?: string[], reason?: string }` |
 | POST | `/api/shutdown` | **关闭整个服务**（先卸载模型，再停止接受新连接，再关 DB） | — | `{ ok: boolean }` 后随即进程退出 |
 
 端点语义（与 §3.4 / §6.4 配合）：
 
+- `GET /api/service/status` 是**统一反馈端点**：每个子系统一个模块，按启动顺序经历
+  `loading → ok / error`（`db` → `storage` → `lmstudio`）。响应形状：
+  `{ modules, pending, ok, errors }`，其中 `pending=true` 表示还有模块在 loading
+  （调用方应继续轮询），`ok=false` 时 `errors` 聚合所有失败模块的中文原因。
+  它**不局限于模型**——数据库、数据目录可写等非致命问题同样如实呈现；脚本与未来的
+  callback 都以此为唯一状态来源，避免"script 认为好了、后端认为没好"的分歧。
+  致命错误（如 db 打不开、服务完全无法启动）仍按现状处理：进程退出，轮询方以
+  "连接被拒"识别，不会伪装成 ok。
 - `POST /api/lmstudio/unload` 与 `/api/shutdown` 互不替代：前者只卸载模型、后端继续运行，
   后者关整个服务。两者执行的是**同一套** LM Studio 动作（卸载），区别只在后续步骤。
 - `unload` 的 `ok: false` 是**业务结果而非服务器错误**，故仍返回 HTTP 200：
@@ -364,10 +373,32 @@ data: {"error": "LMSTUDIO_UNAVAILABLE", "message": "无法连接 LM Studio"}
     不得让推理端点暴露到局域网。
 - 桌面版主程序：**不再作为启动兜底**，仅在 `locate()` 的结果中保留来源信息供诊断。
 - `windowsHide: true` 默认隐藏 console 窗口；可通过 `LMSTUDIO_SHOW_CONSOLE=true` 显示（调试用）。
-- 记录 `childProcess.pid` 与 `sessionStartedByUs = true`。**注意**：记录 PID 仅供诊断展示——
-  §6.4 已取消一切基于 PID 的终止动作，且实测 `lms server start` 是短命 CLI（见 impl-note），
-  该 PID 在数百毫秒后即失效，不可用于任何进程操作。
 - 监听 `childProcess` exit：若在服务运行期间 LM Studio 被外部关闭，标记 `running=false` 并允许后续重试启动。
+
+**确保模型就绪循环（2026 新增，`ensureModelReady()`）**
+
+取代旧的"单次异步预热"：启动后在后端后台运行**带验证与重试**的加载循环，
+进度实时写入内存状态，由 `/api/service/status` 忠实汇报（§5.4）。
+
+- **每轮开头确保服务器可达**：不可达则 `lms server start`（幂等，实测已运行时也
+  返回 Success），再轮询 `/v1/models` 直到可达或超时。
+- **查官方加载状态**（HTTP `/api/v0/models` 的 `state` 字段，实测为
+  `loading → loaded`，另有 `not-loaded`；`lms ps --json` 的 `status` 加载中即为
+  `idle`，**不可靠**）：
+  - `loaded` → 本轮成功。**绝不重复 load**——实测每次成功 load 都新建 `:N` 实例，
+    重复会吃干显存。
+  - `loading` → 等待（30B 冷加载实测约 8s；**loading 不算失败**，避免过早误判），
+    在 `LMSTUDIO_LOAD_WAIT_TIMEOUT_MS` 内轮询到 loaded。
+  - `not-loaded` → 显式 load 一次，然后复核。
+- 一轮失败 → 记录原因，等 `LMSTUDIO_RETRY_INTERVAL_MS`（默认 10s）后进入下一轮；
+  共 `LMSTUDIO_RETRY_ATTEMPTS`（默认 3）轮。
+- 全部耗尽仍未 loaded：**服务继续运行**（best-effort）——模型加载失败不影响
+  合集/历史等其它功能，翻译走既有的 `LMSTUDIO_UNAVAILABLE` 降级；失败状态由
+  `/api/service/status` 以 `lmstudio: error` 忠实呈现。
+- `run.ps1` **不参与加载与重试**：它启动后端后轮询 `/api/service/status` 直到
+  `pending=false`（所有模块落定）或 2 分钟超时，再把失败模块的错误打印出来
+  （未来接入 server callback，方案待定）。模型标识仍由 `LMSTUDIO_MODEL` 一处决定
+  （§11），`run.ps1` 的 `-Model` 参数只是把它透传给后端的 env。
 
 ### 6.4 模型卸载策略（取代原"关闭归属判定"）
 
@@ -636,8 +667,11 @@ offline-translation-service/
 | `LMSTUDIO_STARTUP_TIMEOUT_MS` | `120000` | 启动探测总超时（设计初稿为 60s，实测上调以覆盖冷启动；模型冷加载另见 `LMSTUDIO_WARMUP`） |
 | `LMSTUDIO_PROBE_INTERVAL_MS` | `1000` | 探测初始间隔；超过 10 次后指数退避至 3000ms |
 | `LMSTUDIO_PROBE_TIMEOUT_MS` | `2000` | 单次探测超时 |
-| `LMSTUDIO_WARMUP` | `true` | 端点就绪后是否显式预加载模型（§13 第 5 条） |
+| `LMSTUDIO_WARMUP` | `true` | 端点就绪后是否显式预加载模型（§13 第 5 条；现为 §6.3 的"确保模型就绪循环"） |
 | `LMSTUDIO_LOAD_TIMEOUT_MS` | `300000` | 显式加载模型允许的耗时（30B MoE 冷加载可达分钟级） |
+| `LMSTUDIO_RETRY_ATTEMPTS` | `3` | 确保模型就绪循环的最大尝试次数（含首次，§6.3）。耗尽仍未 loaded 时服务**继续运行**，状态由 `/api/service/status` 汇报 |
+| `LMSTUDIO_RETRY_INTERVAL_MS` | `10000` | 两轮模型加载尝试之间的间隔 |
+| `LMSTUDIO_LOAD_WAIT_TIMEOUT_MS` | `60000` | 单次加载后等待 state 变 `loaded` 的超时（30B 冷加载实测约 8s，留足余量） |
 | `LMSTUDIO_SHOW_CONSOLE` | `false` | spawn lmstudio.exe 时是否显示 console 窗口（调试用） |
 | `TRANSLATE_MAX_CHARS` | `10000` | 单次翻译原文最大字符数，超出返回 `400 { error: "INPUT_TOO_LONG" }` |
 | `MAX_CONCURRENT_STREAMS` | `4` | SSE 并发连接上限（§9.4） |

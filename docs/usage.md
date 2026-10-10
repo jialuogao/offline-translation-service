@@ -35,17 +35,21 @@ pnpm build            # 共享契约 -> 前端产物 -> 后端
 ```
 
 脚本会自动完成：环境自检 → 首次运行装依赖 → 源码有改动就构建 → 检查端口 →
-**查看** LM Studio 状态（只探测，不代为启动）→ 在独立窗口启动后端 → 等服务就绪 →
-打开浏览器。再次运行时会跳过构建，并在服务已在运行时直接给出界面地址。
+在独立窗口启动后端 → 等服务就绪 → **等待各子系统状态落定**（后端自动拉起
+LM Studio 服务器并加载模型，最多重试 3 次，失败会在这里提示）→ 打开浏览器。
+再次运行时会跳过构建，并在服务已在运行时直接给出界面地址。
 
-> LM Studio 的启动归后端所有：端点不可达时它会执行 `lms server start`，
-> 对「LM Studio 完全没开」的冷机器同样有效。
+> LM Studio 的启动与模型加载都归后端所有：端点不可达时它执行 `lms server start`
+> （对「LM Studio 完全没开」的冷机器同样有效），随后运行"确保模型就绪"循环——
+> 验证 + 重试最多 3 次，进度与结果由 `GET /api/service/status` 汇报（见下方
+> 「模型加载失败会怎样」）。run.ps1 只负责把结论呈现给你，不参与加载。
 
 可选参数：
 
 ```powershell
 .\run.ps1 -Port 5175       # 换端口
 .\run.ps1 -NoBrowser       # 不开浏览器
+.\run.ps1 -Model <id>      # 换模型（透传给后端；默认 hy-mt2-30b-a3b-uncensored-v1-apex）
 .\run.ps1 -SkipBuild       # 跳过构建检查（更快）
 .\run.ps1 -ForceBuild      # 强制重新构建
 ```
@@ -199,6 +203,29 @@ pnpm --filter @ots/web dev        # Vite（5173），/api 代理到 5174
 
 > 程序化控制（由其它项目调度）**只能用 `shutdown.ps1`**：`Ctrl+C` 依赖有人在窗口前
 > 手工确认，无法无人值守。
+
+## 模型加载失败会怎样
+
+启动时后端会后台运行「确保模型就绪」循环（DESIGN.md §6.3）：拉起 LM Studio 服务器、
+加载 `LMSTUDIO_MODEL` 指向的模型，**失败会重试，共 3 次**（间隔约 10 秒）。
+
+- **加载成功**：`run.ps1` 会打印「LM Studio 与模型就绪」。
+- **3 次都失败**：**服务照常运行**——合集、历史等其它功能不受影响，只有翻译不可用
+  （界面会显示 `LMSTUDIO_UNAVAILABLE`，可点「重试」）。`run.ps1` 会把失败原因
+  打印出来，并提示「可能需要手动杀掉 LM Studio 进程后重试」。
+- **统一状态端点**：`GET /api/service/status` 汇报 db / storage / lmstudio 三个模块
+  的当前状态（`loading` / `ok` / `error`）。它不局限于模型——数据库、数据目录
+  可写等非致命问题也会如实反映。程序化调用方可轮询它直到 `pending=false`
+  （所有模块落定），再根据 `errors` 决定如何处理。
+- **门户上报（Service alerts）**：如果 `run.ps1` 是被 personal-util-server 门户通过
+  `startScript` 启动的，会拿到门户注入的 `PU_REPORT_URL` / `PU_REPORT_TOKEN`；
+  启动失败时按门户协议把原因上报（POST `{token, message}` 到 `PU_REPORT_URL`），
+  手机上的门户首页 / 管理页就能直接看到「离线翻译服务启动异常」及原因。
+  手动运行（没有这两个环境变量）时跳过上报，只打印。
+
+「可能需要杀 LM Studio」的意思是：LM Studio 偶发卡死在半加载状态时，杀掉它的进程
+再让 `run.ps1` 重来，通常就能恢复。这只在确认 LM Studio 自身异常时才需要做——本服务
+自己**从不**终止 LM Studio 进程（§6.4）。
 
 ## 关闭服务到底做了什么
 

@@ -62,6 +62,9 @@ function managerOptions(overrides: Partial<ManagerOptions> = {}): ManagerOptions
     modelId: MODEL,
     unloadTimeoutMs: 1_000,
     listTimeoutMs: 1_000,
+    retryAttempts: 3,
+    retryIntervalMs: 1,
+    loadWaitTimeoutMs: 500,
     log: () => {
       /* 静音 */
     },
@@ -457,5 +460,67 @@ describe('winProcess 查询', () => {
         server.close(() => resolve());
       });
     }
+  });
+});
+
+describe('§6.3 确保模型就绪循环（ensureModelReady）', () => {
+  it('目标模型已驻留 → 立即成功，绝不重复 load', async () => {
+    const adapter = createFakeAdapter({
+      reachable: true,
+      models: [{ id: MODEL, state: 'loaded' }],
+    });
+    const manager = new LMStudioProcessManager(
+      managerOptions({ adapter: adapter as unknown as ManagerOptions['adapter'] }),
+    );
+    const state = await manager.ensureModelReady(MODEL);
+    expect(state.state).toBe('loaded');
+    expect(adapter.loadCalls).toEqual([]);
+    expect(manager.getModelLoadState()).toMatchObject({ state: 'loaded', attempts: 1 });
+  });
+
+  it('not-loaded → load 一次 → 成功', async () => {
+    const adapter = createFakeAdapter({
+      reachable: true,
+      models: [{ id: MODEL, state: 'not-loaded' }],
+    });
+    const manager = new LMStudioProcessManager(
+      managerOptions({ adapter: adapter as unknown as ManagerOptions['adapter'] }),
+    );
+    const state = await manager.ensureModelReady(MODEL);
+    expect(state.state).toBe('loaded');
+    // fake 的 loadMaterial 成功后把模型记为 loaded，因此一轮即成功。
+    expect(adapter.loadCalls).toEqual([MODEL]);
+  });
+
+  it('load 失败 → 耗尽全部重试次数 → failed 且报告最后一次原因', async () => {
+    const adapter = createFakeAdapter({
+      reachable: true,
+      models: [{ id: MODEL, state: 'not-loaded' }],
+      // 载荷失败：每次 load 都返回 false，模型始终不 loaded。
+      loadResult: false,
+    });
+    const manager = new LMStudioProcessManager(
+      managerOptions({ adapter: adapter as unknown as ManagerOptions['adapter'], retryIntervalMs: 0 }),
+    );
+    const state = await manager.ensureModelReady(MODEL);
+    expect(state.state).toBe('failed');
+    expect(state.attempts).toBe(3);
+    expect(state.maxAttempts).toBe(3);
+    expect(state.lastError).toBeTruthy();
+  });
+
+  it('服务器不可达 → 每轮失败，重试到耗尽给出 failed', async () => {
+    const adapter = createFakeAdapter({ reachable: false });
+    const manager = new LMStudioProcessManager(
+      managerOptions({
+        adapter: adapter as unknown as ManagerOptions['adapter'],
+        retryIntervalMs: 0,
+        locate: () => null,
+      }),
+    );
+    const state = await manager.ensureModelReady(MODEL);
+    expect(state.state).toBe('failed');
+    expect(state.attempts).toBe(3);
+    expect(state.lastError).toContain('服务器不可达');
   });
 });

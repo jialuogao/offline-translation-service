@@ -33,6 +33,12 @@ export interface LMStudioProcessManagerOptions {
   unloadTimeoutMs: number;
   /** `lms ps --json` 子进程超时。 */
   listTimeoutMs: number;
+  /** 模型加载重试次数（含首次，§6.3 确保就绪循环）。 */
+  retryAttempts: number;
+  /** 两轮加载尝试之间的间隔。 */
+  retryIntervalMs: number;
+  /** 单次加载后等待 state 变 loaded 的超时（30B 冷加载实测约 8s）。 */
+  loadWaitTimeoutMs: number;
   /** 注入点：默认 `locateLmStudio`，测试可替换。 */
   locate?: typeof locateLmStudio;
   /** 注入点：默认 `runLms`，测试可替换（测试绝不可真跑 `lms`）。 */
@@ -58,9 +64,24 @@ export interface UnloadResult {
   reason?: string;
 }
 
+/** 模型加载循环的对外状态（DESIGN.md §6.3 / §5.4 service status）。 */
+export interface ModelLoadState {
+  state: 'idle' | 'loading' | 'loaded' | 'failed';
+  /** 已尝试次数（含进行中的这一次）。 */
+  attempts: number;
+  /** 最大尝试次数。 */
+  maxAttempts: number;
+  /** 最近一次失败原因（state 为 failed 时存在）。 */
+  lastError?: string;
+  /** 目标模型标识。 */
+  model?: string;
+}
+
 export class LMStudioProcessManager {
   private readonly options: LMStudioProcessManagerOptions;
   private child: ChildProcess | null = null;
+  /** 模型加载循环的当前状态（§6.3 确保就绪），供 `/api/service/status` 轮询。 */
+  private loadState: ModelLoadState = { state: 'idle', attempts: 0, maxAttempts: 0 };
 
   constructor(options: LMStudioProcessManagerOptions) {
     this.options = options;
@@ -328,6 +349,166 @@ export class LMStudioProcessManager {
 
     const ok = await this.options.adapter.loadModel(target);
     return { attempted: true, model: target, ok, alreadyResident: false };
+  }
+
+  /**
+   * 确保目标模型已驻留（DESIGN.md §6.3）：best-effort 循环，替代"单次异步预热"。
+   *
+   * 与 `warmup()` 的单次语义不同，这里是**带验证与重试**的完整流程：
+   *
+   * 1. 每轮开头确保服务器可达（不可达则 `lms server start`，幂等，实测安全）。
+   * 2. 查 `/api/v0/models` 的官方 `state`：
+   *    - `loaded` → 本轮即成功（绝不重复 load——重复 load 会新建 `:N` 实例吃显存）。
+   *    - `loading` → 等待 `loadWaitTimeoutMs` 再查（30B 冷加载实测约 8s；**loading 不算失败**）。
+   *    - `not-loaded` → 显式 load 一次，然后回到 2 复核。
+   * 3. 一轮失败 → 记录原因，等 `retryIntervalMs` 后进入下一轮。
+   *
+   * 全部轮次耗尽仍未 loaded：**服务继续运行**（best-effort），状态定格为
+   * `failed`，由 `/api/service/status` 忠实汇报；翻译走既有的
+   * `LMSTUDIO_UNAVAILABLE` 降级，UI 的合集/历史等功能不受影响。
+   *
+   * 循环的进度实时写入 `loadState`，调用方（bootstrap 桥接到 ServiceHealth）
+   * 可以随时轮询。
+   */
+  async ensureModelReady(modelId?: string): Promise<ModelLoadState> {
+    const target = modelId?.trim() ?? this.options.modelId.trim();
+    const maxAttempts = this.options.retryAttempts;
+    this.loadState = {
+      state: target === '' ? 'failed' : 'loading',
+      attempts: 0,
+      maxAttempts,
+      ...(target !== '' ? { model: target } : {}),
+      ...(target === '' ? { lastError: '未配置模型（LMSTUDIO_MODEL）' } : {}),
+    };
+    if (target === '') return this.loadState;
+
+    const sleep = this.options.sleep ?? defaultSleep;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      this.loadState = { ...this.loadState, state: 'loading', attempts: attempt };
+
+      // ① 确保服务器可达（幂等拉起）。
+      const reachable = await this.ensureServerReachable();
+      if (!reachable) {
+        this.loadState = {
+          ...this.loadState,
+          state: 'failed',
+          lastError: `第 ${attempt} 轮：LM Studio 服务器不可达`,
+        };
+        if (attempt < maxAttempts) await sleep(this.options.retryIntervalMs);
+        continue;
+      }
+
+      // ② 查官方 state：loaded 即成功；loading 等待；not-loaded 则 load 后复核。
+      const outcome = await this.tryLoadTarget(target, attempt);
+      if (outcome) {
+        this.loadState = { ...this.loadState, state: 'loaded' };
+        return this.loadState;
+      }
+
+      if (attempt < maxAttempts) await sleep(this.options.retryIntervalMs);
+    }
+
+    // 全部轮次耗尽仍未 loaded：收敛为终态 failed（保留最后一次尝试的原因）。
+    this.loadState = {
+      ...this.loadState,
+      state: 'failed',
+      lastError: this.loadState.lastError ?? '模型加载失败（原因未知）',
+    };
+    return this.loadState;
+  }
+
+  /** 当前模型加载状态（供 `/api/service/status` 读取）。 */
+  getModelLoadState(): ModelLoadState {
+    return this.loadState;
+  }
+
+  /**
+   * 确保服务器可达：可达直接返回；不可达则定位 `lms` 并 spawn `server start`
+   * （幂等，实测服务器已运行也返回 Success），然后轮询到可达或超时。
+   */
+  private async ensureServerReachable(): Promise<boolean> {
+    if (await this.options.adapter.isReachable()) return true;
+
+    const located = this.locate();
+    if (located === null || located.kind !== 'lms-cli') return false;
+    const args = serverStartArgs(this.options.baseUrl, located.args);
+    this.options.log?.(`（重试循环）拉起 LM Studio 服务器：${located.path} ${args.join(' ')}`);
+
+    const child = spawn(located.path, args, {
+      windowsHide: !this.options.showConsole,
+      detached: false,
+      stdio: 'ignore',
+    });
+    this.child = child;
+    child.on('error', (error) => {
+      this.options.log?.(`LM Studio 启动失败：${error.message}`);
+      if (this.child === child) this.child = null;
+    });
+    child.on('exit', () => {
+      if (this.child === child) this.child = null;
+    });
+    if (typeof child.unref === 'function') child.unref();
+
+    return this.waitUntilReachable();
+  }
+
+  /**
+   * 单轮"查 state → 必要时 load → 复核"。
+   *
+   * 返回 true 表示目标模型已驻留（loaded）。三种路径：
+   * - 已驻留：直接成功（不重复 load）。
+   * - 加载中：在 `loadWaitTimeoutMs` 内轮询 state 直到 loaded 或超时（超时不等于失败）。
+   * - 未驻留：`adapter.loadModel` 一次，成功后再复核。
+   */
+  private async tryLoadTarget(target: string, attempt: number): Promise<boolean> {
+    const sleep = this.options.sleep ?? defaultSleep;
+
+    const stateOf = async (): Promise<'loaded' | 'loading' | 'not-loaded' | 'unknown'> => {
+      try {
+        const models = await this.options.adapter.describeModels();
+        if (isModelResident(models, target)) return 'loaded';
+        // state 字段存在时才可信（老版本端点只有 /v1/models）。
+        const known = models.filter((model) => model.state !== 'unknown');
+        if (known.length === 0) return 'unknown';
+        const match = known.find((model) => model.id === target || model.id.startsWith(`${target}:`));
+        if (match?.state === 'loading') return 'loading';
+        return 'not-loaded';
+      } catch {
+        return 'unknown';
+      }
+    };
+
+    const waitUntilLoaded = async (deadline: number): Promise<boolean> => {
+      for (;;) {
+        const state = await stateOf();
+        if (state === 'loaded') return true;
+        if (Date.now() >= deadline) return false;
+        await sleep(Math.min(this.options.loadWaitTimeoutMs, Math.max(deadline - Date.now(), 1)));
+      }
+    };
+
+    // ① 已驻留 → 成功。
+    if (await waitUntilLoaded(Date.now() + 1)) return true;
+
+    // ② 触发加载（已驻留检查过才走到这里；loadModel 内部也会再查一次）。
+    const triggered = await this.options.adapter.loadModel(target);
+    if (!triggered) {
+      this.loadState = {
+        ...this.loadState,
+        lastError: `第 ${attempt} 轮：模型加载请求失败`,
+      };
+      return false;
+    }
+
+    // ③ 复核：加载请求成功 ≠ 已驻留（可能仍在 loading / 实际失败），等它落定。
+    const ok = await waitUntilLoaded(Date.now() + this.options.loadWaitTimeoutMs);
+    if (!ok) {
+      this.loadState = {
+        ...this.loadState,
+        lastError: `第 ${attempt} 轮：模型加载超时（${this.options.loadWaitTimeoutMs}ms 未见 loaded）`,
+      };
+    }
+    return ok;
   }
 }
 

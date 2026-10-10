@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import type { Server } from 'node:http';
 import { config } from './config.js';
 import { openDb } from './db/index.js';
@@ -7,6 +8,7 @@ import { TranslationService } from './services/translationService.js';
 import { LMStudioAdapter } from './lmstudio/adapter.js';
 import { LMStudioProcessManager } from './lmstudio/process.js';
 import { ShutdownController } from './shutdown.js';
+import { ServiceHealth } from './health.js';
 import { createApp } from './http/app.js';
 
 /**
@@ -16,6 +18,9 @@ import { createApp } from './http/app.js';
  * 3. 启动 HTTP 服务并托管前端。
  *
  * 进程入口是 index.ts；这里不注册信号处理器，避免被测试 import 时产生副作用。
+ *
+ * 健康状态（§5.4 `GET /api/service/status`）：每个模块按启动顺序经历
+ * `loading` → `ok` / `error`，任何中间态都会如实出现在快照里。
  */
 
 function log(message: string): void {
@@ -27,6 +32,7 @@ export interface RunningService {
   shutdown: ShutdownController;
   collections: CollectionService;
   processManager: LMStudioProcessManager;
+  health: ServiceHealth;
   /** 监听端口（`PORT=0` 时由系统分配，测试用）。 */
   port: number;
 }
@@ -36,12 +42,30 @@ export async function startService(
   overrides: { log?: (message: string) => void; skipLmStudioStartup?: boolean } = {},
 ): Promise<RunningService> {
   const logger = overrides.log ?? log;
+  const health = new ServiceHealth();
+
   logger(`数据库：${config.dbPath}`);
+  health.begin('db', config.dbPath);
   fs.mkdirSync(config.dbPath.replace(/[\\/][^\\/]+$/, ''), { recursive: true });
   const db = openDb(config.dbPath);
   const collections = new CollectionService(db);
   const active = collections.init();
+  health.succeed('db', config.dbPath);
   logger(`当前合集：${active.name}（${active.id}）`);
+
+  // 数据目录可写自检：只读介质/磁盘满会让历史写不进去，但界面浏览仍可用，
+  // 因此这是"记录但不致命"的模块（§5.4）。
+  health.begin('storage');
+  try {
+    const probe = path.join(path.dirname(config.dbPath), `.write-test-${process.pid}`);
+    fs.writeFileSync(probe, 'ok');
+    fs.rmSync(probe, { force: true });
+    health.succeed('storage');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    health.fail('storage', message);
+    logger(`警告：数据目录不可写（${message}）；翻译历史将无法保存`);
+  }
 
   const adapter = new LMStudioAdapter({
     baseUrl: config.lmstudioBaseUrl,
@@ -62,38 +86,49 @@ export async function startService(
     modelId: config.lmstudioModel,
     unloadTimeoutMs: config.lmstudioUnloadTimeoutMs,
     listTimeoutMs: config.lmstudioListTimeoutMs,
+    retryAttempts: config.lmstudioRetryAttempts,
+    retryIntervalMs: config.lmstudioRetryIntervalMs,
+    loadWaitTimeoutMs: config.lmstudioLoadWaitTimeoutMs,
     log: (message) => logger(message),
   });
 
   if (overrides.skipLmStudioStartup !== true) {
+    health.begin('lmstudio', '正在确保 LM Studio 服务器与模型就绪');
     const startup = await processManager.startup();
     if (startup.running) {
       logger('LM Studio 就绪');
       if (config.lmstudioWarmup) {
         // 不阻塞 HTTP 启动：30B 模型冷加载可能数十秒，先把界面放出去。
+        // 这是 best-effort 循环：全部重试耗尽仍未 loaded 时服务继续运行，
+        // 状态由 /api/service/status 忠实汇报（§5.4 / §6.3）。
         void processManager
-          .warmup(config.lmstudioModel)
-          .then((result) => {
-            if (result.alreadyResident) {
-              // 已驻留就不要再 load：LM Studio 每次成功 load 都会新建实例（吃内存）。
-              logger(`模型已驻留内存，跳过预加载：${result.model}`);
+          .ensureModelReady(config.lmstudioModel)
+          .then(() => {
+            const state = processManager.getModelLoadState();
+            if (state.state === 'loaded') {
+              health.succeed('lmstudio', `模型已加载：${state.model}`);
+              logger(`模型已预加载：${state.model}`);
               return;
             }
-            if (!result.attempted) return;
+            const reason = state.lastError ?? '未知原因';
+            health.fail('lmstudio', reason, `模型加载失败（已尝试 ${state.attempts}/${state.maxAttempts} 次）`);
             logger(
-              result.ok
-                ? `模型已预加载：${result.model}`
-                : `模型预加载未成功（${result.model}），首次翻译可能较慢`,
+              `模型预加载未成功（已尝试 ${state.attempts}/${state.maxAttempts} 次）：${reason}`
+              + '；服务继续运行，首次翻译会尝试隐式加载，可稍后重试',
             );
           })
           .catch((error: unknown) => {
-            logger(
-              `模型预加载出错（已忽略）：${error instanceof Error ? error.message : String(error)}`,
-            );
+            const message = error instanceof Error ? error.message : String(error);
+            health.fail('lmstudio', message, '模型预加载循环异常');
+            logger(`模型预加载出错（已忽略）：${message}`);
           });
+      } else {
+        health.succeed('lmstudio', '已禁用自动加载（LMSTUDIO_WARMUP=false）');
       }
     } else {
-      logger('LM Studio 不可用；翻译将返回 LMSTUDIO_UNAVAILABLE，可稍后重试');
+      const reason = 'LM Studio 服务器不可用';
+      health.fail('lmstudio', reason);
+      logger(`${reason}；翻译将返回 LMSTUDIO_UNAVAILABLE，可稍后重试`);
     }
   }
 
@@ -114,6 +149,7 @@ export async function startService(
     adapter,
     processManager,
     shutdown,
+    health,
     webRoot: config.webRoot,
     maxConcurrentStreams: config.maxConcurrentStreams,
   });
@@ -132,5 +168,5 @@ export async function startService(
   // 而停机控制器又是 app 的依赖，因此在此回填。
   shutdown.attachServer(server);
 
-  return { server, shutdown, collections, processManager, port };
+  return { server, shutdown, collections, processManager, health, port };
 }

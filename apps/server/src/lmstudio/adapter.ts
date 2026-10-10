@@ -53,7 +53,7 @@ export interface LMStudioAdapterOptions {
 /** 单个模型的描述（§13 第 5 条：区分"已加载"与"仅可用"）。 */
 export interface ModelInfo {
   id: string;
-  state: 'loaded' | 'not-loaded' | 'unknown';
+  state: 'loaded' | 'loading' | 'not-loaded' | 'unknown';
 }
 
 /** 优于 `/v1/models` 的元数据端点；Mock 未实现时自动降级。 */
@@ -336,7 +336,7 @@ export class LMStudioAdapter {
 
 const DONE_SENTINEL = Symbol('sse-done');
 
-/** 把模型列表响应规范化为 `ModelInfo[]`；缺 `state` 时记为 unknown。 */
+/** 把模型列表响应规范化为 `ModelInfo[]`；缺 `state` 或未知值时记为 unknown。 */
 function parseModelList(payload: unknown): ModelInfo[] {
   const data = (payload as ModelListResponse | null)?.data;
   if (!Array.isArray(data)) {
@@ -347,7 +347,9 @@ function parseModelList(payload: unknown): ModelInfo[] {
     const id = item?.id;
     if (typeof id !== 'string' || id === '') continue;
     const state =
-      item.state === 'loaded' || item.state === 'not-loaded' ? item.state : ('unknown' as const);
+      item.state === 'loaded' || item.state === 'loading' || item.state === 'not-loaded'
+        ? item.state
+        : ('unknown' as const);
     models.push({ id, state });
   }
   return models;

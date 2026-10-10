@@ -7,9 +7,11 @@ import type { TranslationService } from '../services/translationService.js';
 import type { LMStudioAdapter } from '../lmstudio/adapter.js';
 import type { LMStudioProcessManager } from '../lmstudio/process.js';
 import type { ShutdownController } from '../shutdown.js';
+import type { ServiceHealth } from '../health.js';
 import { createCollectionsRouter } from '../routes/collections.js';
 import { createEntriesRouter } from '../routes/entries.js';
 import { createLmStudioRouter, createShutdownRouter } from '../routes/lmstudio.js';
+import { createServiceStatusRouter } from '../routes/status.js';
 import { createTranslateRouter } from '../routes/translate.js';
 
 /**
@@ -24,6 +26,8 @@ export interface AppDependencies {
   adapter: LMStudioAdapter;
   processManager: LMStudioProcessManager;
   shutdown: ShutdownController;
+  /** 服务健康状态（§5.4 `GET /api/service/status`）。 */
+  health: ServiceHealth;
   /** 前端构建产物目录；不存在时给出可读提示而不是 404。 */
   webRoot: string;
   maxConcurrentStreams: number;
@@ -57,6 +61,7 @@ export function createApp(deps: AppDependencies): Express {
     maxConcurrentStreams: deps.maxConcurrentStreams,
   }));
   app.use('/api', createLmStudioRouter(deps.adapter, deps.processManager));
+  app.use('/api', createServiceStatusRouter(deps.health));
   app.use('/api', createShutdownRouter(deps.shutdown));
 
   // 未匹配的 /api 路由：统一 JSON 404，避免落到 SPA 回退。

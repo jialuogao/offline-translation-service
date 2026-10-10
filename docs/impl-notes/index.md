@@ -17,7 +17,7 @@ disagree, the code is right and the note is stale — fix it here.
 
 | Source path | Note |
 |---|---|
-| `apps/server/src/index.ts`, `bootstrap.ts`, `config.ts`, `shutdown.ts` | `runtime-and-config` |
+| `apps/server/src/index.ts`, `bootstrap.ts`, `config.ts`, `shutdown.ts`, `health.ts` | `runtime-and-config` |
 | `apps/server/src/db/*`, `services/collectionService.ts` | `collections-and-db` |
 | `apps/server/src/lmstudio/*` | `lmstudio-lifecycle` |
 | `apps/server/src/services/translationService.ts` | `translation-and-sse` |

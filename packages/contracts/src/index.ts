@@ -127,6 +127,40 @@ export interface LmStudioModelsResponse {
 }
 
 /**
+ * 各子系统当前状态（DESIGN.md §5.4 `GET /api/service/status`）。
+ *
+ * 启动时每个模块按顺序经历 `loading` → `ok` / `error`：
+ * `db`（数据库打开/可用）→ `storage`（数据目录可写）→ `lmstudio`（服务器可达 + 模型驻留）。
+ * `loading` 表示仍在尝试/重试中；`ok` / `error` 是终态。调用方（run.ps1 / 未来的
+ * callback）应持续轮询直到**所有**模块都不再是 `loading`，再决定如何呈现。
+ */
+export type ServiceModuleState = 'loading' | 'ok' | 'error' | 'unknown';
+
+export interface ServiceModuleStatus {
+  state: ServiceModuleState;
+  /** 人类可读的当前说明（如加载中的模型名、成功/失败原因）。 */
+  detail?: string;
+  /** state 为 error 时的失败原因。 */
+  error?: string;
+  /** 该模块已尝试的次数（仅 lmstudio 等会重试的模块）。 */
+  attempts?: number;
+  /** 该模块最大尝试次数。 */
+  maxAttempts?: number;
+}
+
+/** DESIGN.md §5.4 `GET /api/service/status` 响应。 */
+export interface ServiceStatus {
+  /** 每个子系统的状态；key 固定为 db / storage / lmstudio。 */
+  modules: Record<string, ServiceModuleStatus>;
+  /** 是否还有模块处于 loading（未到终态）；true 时调用方应继续轮询。 */
+  pending: boolean;
+  /** 是否全部模块成功（ok）。 */
+  ok: boolean;
+  /** 所有 error 模块的聚合；ok 为 true 时为空。 */
+  errors: Array<{ module: string; message: string }>;
+}
+
+/**
  * DESIGN.md §5.4 `POST /api/shutdown`。
  *
  * 请求体已清空：原 `closeLmStudio` 决定是否终止 LM Studio，而 §6.4 规定

@@ -7,6 +7,7 @@ import { TranslationService } from '../../apps/server/src/services/translationSe
 import { LMStudioAdapter, LMStudioError } from '../../apps/server/src/lmstudio/adapter.js';
 import { LMStudioProcessManager } from '../../apps/server/src/lmstudio/process.js';
 import { ShutdownController } from '../../apps/server/src/shutdown.js';
+import { ServiceHealth } from '../../apps/server/src/health.js';
 import { createApp } from '../../apps/server/src/http/app.js';
 import { api } from '../helpers/http.js';
 import { listenOnSafePort, scratchDir } from '../helpers/paths.js';
@@ -135,6 +136,9 @@ export async function createE2EContext(): Promise<E2EContext> {
     modelId: E2E_MODEL,
     unloadTimeoutMs: 60_000,
     listTimeoutMs: 30_000,
+    retryAttempts: 1,
+    retryIntervalMs: 1_000,
+    loadWaitTimeoutMs: 1_800_000,
     log: () => {
       /* 静音 */
     },
@@ -157,6 +161,7 @@ export async function createE2EContext(): Promise<E2EContext> {
     adapter,
     processManager,
     shutdown,
+    health: new ServiceHealth(),
     webRoot: `${dir}/no-web-root`,
     maxConcurrentStreams: 4,
   });

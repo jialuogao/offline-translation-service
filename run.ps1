@@ -3,8 +3,8 @@
   离线翻译服务一键启动（Windows / PowerShell）。
 
 .DESCRIPTION
-  依次完成：环境自检 → 必要时安装依赖 → 必要时构建 → 检查 LM Studio →
-  启动后端（独立窗口）→ 等待就绪 → 打开浏览器。
+  依次完成：环境自检 → 必要时安装依赖 → 必要时构建 → 确保 LM Studio 服务器与
+  模型就绪（自动 load，失败重试 3 次）→ 启动后端（独立窗口）→ 等待就绪 → 打开浏览器。
 
   双击或右键"使用 PowerShell 运行"即可；也可以在终端里执行：
       pwsh -File run.ps1
@@ -12,6 +12,11 @@
 
 .PARAMETER Port
   后端端口，默认 5174。
+
+.PARAMETER Model
+  要加载的模型标识，**透传**给后端（设为 LMSTUDIO_MODEL 环境变量）。
+  缺省时后端用自己的默认值（hy-mt2-30b-a3b-uncensored-v1-apex）。
+  注意：本服务只认这一个模型（加载/卸载都以它为准），换模型请显式指定。
 
 .PARAMETER NoBrowser
   不自动打开浏览器。
@@ -29,6 +34,7 @@
 [CmdletBinding()]
 param(
   [int]$Port = 5174,
+  [string]$Model = '',
   [switch]$NoBrowser,
   [switch]$SkipBuild,
   [switch]$ForceBuild
@@ -42,6 +48,14 @@ $serviceEntry = Join-Path $root 'apps\server\dist\index.js'
 $webIndex = Join-Path $root 'apps\server\public\index.html'
 $installMarker = Join-Path $root 'node_modules\.modules.yaml'
 $url = "http://127.0.0.1:$Port/"
+
+# 模型由后端负责加载（§6.3：后端启动后运行"确保模型就绪"循环并写进
+# /api/service/status）。`-Model` 参数只是**透传给后端**的 LMSTUDIO_MODEL
+# 环境变量：显式指定时覆盖，未指定时沿用环境或后端的默认值（hy-...）。
+# run.ps1 自身不 load、不重试、不直接探测 LM Studio。
+if (-not [string]::IsNullOrWhiteSpace($Model)) {
+  $env:LMSTUDIO_MODEL = $Model.Trim()
+}
 
 function Write-Step([string]$message) { Write-Host "==> $message" -ForegroundColor Cyan }
 function Write-Ok([string]$message) { Write-Host "    $message" -ForegroundColor Green }
@@ -63,6 +77,45 @@ function Test-Service([int]$targetPort) {
     return $response.StatusCode -eq 200
   } catch {
     return $false
+  }
+}
+
+<#
+.SYNOPSIS
+  把启动失败原因上报到 personal-util-server 门户（Service alerts 协议，§3.5）。
+
+.DESCRIPTION
+  协议：POST {token, message} 到 $env:PU_REPORT_URL。被门户（startScript）启动的
+  脚本会拿到这两个环境变量；手动运行时不存在，此时只提示、不上报。
+
+  门户使用自签 CA，需要忽略证书校验：pwsh 7 有 -SkipCertificateCheck，
+  PowerShell 5.1 没有，故按版本分支（5.1 用 ServicePointManager 全局回调，
+  try/finally 还原，避免影响脚本其余部分）。
+#>
+function Send-ServiceAlert([string]$message) {
+  if ([string]::IsNullOrWhiteSpace($env:PU_REPORT_URL) -or
+      [string]::IsNullOrWhiteSpace($env:PU_REPORT_TOKEN)) {
+    Write-Note '（未配置 PU_REPORT_URL/PU_REPORT_TOKEN，跳过门户上报）'
+    return
+  }
+  try {
+    $body = @{ token = $env:PU_REPORT_TOKEN; message = $message } | ConvertTo-Json -Compress
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+      Invoke-RestMethod -Uri $env:PU_REPORT_URL -Method Post -ContentType 'application/json' `
+        -Body $body -SkipCertificateCheck -TimeoutSec 5 | Out-Null
+    } else {
+      $previous = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+      try {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        Invoke-RestMethod -Uri $env:PU_REPORT_URL -Method Post -ContentType 'application/json' `
+          -Body $body -TimeoutSec 5 | Out-Null
+      } finally {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previous
+      }
+    }
+    Write-Ok "已上报失败原因到门户：$message"
+  } catch {
+    Write-Warn2 "门户上报失败（不影响启动）：$($_.Exception.Message)"
   }
 }
 
@@ -166,41 +219,18 @@ try {
 }
 Write-Ok "端口 $Port 可用"
 
-# ---------------------------------------------------------------- 4. LM Studio
-# 只做探测与报告，不负责启动：LM Studio 的启动归后端所有
-# （DESIGN.md §6.3/§6.4，2026-10-05 决定）。后端在端点不可达时会自行执行
-# `lms server start`，该命令对冷机器同样有效，因此这里不重复启动。
-Write-Step '检查 LM Studio（http://127.0.0.1:1234）'
-$lmReady = $false
-try {
-  $lm = Invoke-WebRequest -Uri 'http://127.0.0.1:1234/v1/models' -UseBasicParsing -TimeoutSec 3
-  $lmReady = $lm.StatusCode -eq 200
-} catch {
-  $lmReady = $false
-}
-
-if ($lmReady) {
-  $models = @()
-  try {
-    $parsed = (Invoke-WebRequest -Uri 'http://127.0.0.1:1234/api/v0/models' -UseBasicParsing -TimeoutSec 5).Content | ConvertFrom-Json
-    $models = @($parsed.data | Where-Object { $_.state -eq 'loaded' } | Select-Object -ExpandProperty id)
-  } catch {
-    $models = @()
-  }
-  if ($models.Count -gt 0) {
-    Write-Ok "已就绪，已加载模型：$($models -join ', ')"
-  } else {
-    Write-Warn2 '服务在运行，但当前没有已加载的模型；首次翻译会自动加载（可能较慢）'
-  }
-  Write-Note '关闭服务时只会卸载模型以释放内存，LM Studio 服务器会继续运行'
-} else {
-  Write-Warn2 '未检测到 LM Studio 本地服务器；后端启动时会自动拉起它'
-  Write-Note '若长时间仍未就绪，请在 LM Studio 里打开本地服务器，并在界面上点"重试"'
-}
+# ---------------------------------------------------------------- 4.（已移除）
+# 旧版在这里直接探测 LM Studio 的 HTTP 端点。现在改为：后端启动后轮询其
+# 统一反馈端点 `/api/service/status`（§5.4）——LM Studio 服务器拉起、模型加载、
+# 数据库可用性都由后端负责并在该端点忠实汇报；run.ps1 只负责呈现结论。
+# 这样避免了两处判断不一致（script 认为好了、后端认为没好）。
 
 # ---------------------------------------------------------------- 5. 启动后端
 Write-Step '启动后端（独立窗口；在界面点「关闭服务」可卸载模型并正常退出）'
 $env:PORT = "$Port"
+# 模型加载由后端负责（LMSTUDIO_MODEL，默认 hy-...）；run.ps1 不 load、
+# 不做重试。后端启动后会在后台运行"确保模型就绪"循环，并把进度写进
+# /api/service/status（§6.3）。
 $server = Start-Process -FilePath 'pnpm.cmd' -ArgumentList @('start') -WorkingDirectory $root `
   -PassThru -WindowStyle Normal
 if ($null -eq $server) { Fail '无法启动后端进程' }
@@ -226,6 +256,53 @@ if (-not $ready) {
   Fail '等待服务就绪超时（90 秒）' @('请查看后端窗口的输出')
 }
 Write-Ok '服务已就绪'
+
+# ---------------------------------------------------------------- 6.5 等待服务状态落定
+# 统一反馈端点（DESIGN.md §5.4）：后端汇报 db / storage / lmstudio 三个模块的
+# 状态（loading → ok / error）。这里轮询到**所有模块都不再 loading**（全部落定），
+# 或 2 分钟超时；然后把失败模块的错误打印出来（被 personal-util-server 门户启动时，
+# 还会按 §3.5 的 Service alerts 协议上报到 PU_REPORT_URL）。
+# 无论模型是否加载成功都不阻塞打开界面：UI 的合集/历史等功能不依赖翻译。
+Write-Step '等待各子系统状态落定（模型加载最多重试 3 次）'
+$statusUrl = "http://127.0.0.1:$Port/api/service/status"
+$statusDone = $false
+$statusDeadline = (Get-Date).AddSeconds(120)
+while ((Get-Date) -lt $statusDeadline) {
+  $pending = $false
+  try {
+    $svc = (Invoke-WebRequest -Uri $statusUrl -UseBasicParsing -TimeoutSec 3).Content | ConvertFrom-Json
+    $pending = $svc.pending -eq $true
+  } catch {
+    $pending = $true   # 后端刚起，端点还没就绪：继续等
+  }
+  if (-not $pending) { $statusDone = $true; break }
+  Start-Sleep -Seconds 2
+}
+
+if ($statusDone) {
+  try {
+    $svc = (Invoke-WebRequest -Uri $statusUrl -UseBasicParsing -TimeoutSec 3).Content | ConvertFrom-Json
+    if ($svc.ok -eq $true) {
+      $loaded = $svc.modules.lmstudio.detail
+      if ($loaded) { Write-Ok "LM Studio 与模型就绪：$loaded" }
+      else { Write-Ok '全部子系统就绪' }
+    } else {
+      Write-Warn2 '部分子系统未就绪：'
+      foreach ($err in $svc.errors) {
+        Write-Warn2 "  - $($err.module)：$($err.message)"
+      }
+      Write-Warn2 '  （提示：若 LM Studio 反复加载失败，可能需要手动杀掉 LM Studio 进程后重试）'
+      $alertMessage = ($svc.errors | ForEach-Object { "$($_.module)：$($_.message)" }) -join '；'
+      Send-ServiceAlert "离线翻译服务启动异常：$alertMessage"
+    }
+  } catch {
+    Write-Warn2 '无法读取服务状态（后端可能已退出），请查看后端窗口输出'
+  }
+} else {
+  Write-Warn2 '等待服务状态落定超时（120 秒）；界面已可用，但模型可能尚未就绪'
+  Write-Warn2 '  （提示：若 LM Studio 反复加载失败，可能需要手动杀掉 LM Studio 进程后重试）'
+  Send-ServiceAlert '离线翻译服务启动超时（120 秒内子系统状态未落定）；模型可能未加载'
+}
 
 # ---------------------------------------------------------------- 7. 打开界面
 if (-not $NoBrowser) {

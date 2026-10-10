@@ -94,7 +94,12 @@ Verified separately: with the server **stopped** (`lms server status` → "not r
 `hy-mt2-30b-a3b-uncensored-v1-apex  IDLE  14.23 GB  Local`. Stopping the server does **not**
 unload the model, and only the app process holds that state.
 
-## Consequence: the recorded child PID is dead on arrival
+## Consequence: the recorded child PID is dead on arrival (historical)
+
+> This section explains the **pre-§6.4** design, when the manager recorded a PID to
+> decide shutdown ownership. §6.4 deleted `startedByUs` / `pid` and all PID-based
+> termination, so the "recording" it critiques no longer exists; the hazard analysis
+> (Windows PID reuse) is what remains worth remembering.
 
 `launch()` spawns `lms.exe server start` and records **that CLI's PID**. Since the CLI exits
 after ~290 ms, the PID is stale almost immediately:
@@ -226,14 +231,39 @@ if process management is ever deliberately reinstated. `terminateProcessTree` is
 only one that actually acts, and nothing calls it. See `AGENTS.md`
 ("LM Studio process safety"): ask the user before removing any of it.
 
-### Warm-up (`warmup()`)
+### Warm-up and the "ensure model ready" loop (`warmup()` / `ensureModelReady()`)
 
 `GET /api/v0/models` reports models that are on disk as `not-loaded`, so the first
 translation would pay an implicit load. After the endpoint is reachable, `bootstrap.ts`
-fires `warmup()` **without awaiting it**; it picks the first already-loaded model (else
-the first listed model) and calls `POST /api/v1/models/load` with the generous
-`LMSTUDIO_LOAD_TIMEOUT_MS`. Failure is logged and ignored. Set `LMSTUDIO_WARMUP=false`
-to skip.
+fires the **ensure-model-ready loop** without awaiting it (so HTTP startup is not
+blocked):
+
+- `ensureModelReady()` (DESIGN.md §6.3) replaces the old single-shot warm-up. Each of
+  `LMSTUDIO_RETRY_ATTEMPTS` (default 3) rounds:
+  1. ensures the server is reachable (`lms server start` is idempotent — it returns
+     `Success! Server is now running` even when already running, ~250 ms; cold start
+     ~3.3 s);
+  2. reads the **official** loading state from `GET /api/v0/models` (`state: loading →
+     loaded`, also `not-loaded`) and only acts when needed:
+     - `loaded` → done, **never calls load again** (see "Why the load call must be
+       guarded" below);
+     - `loading` → waits up to `LMSTUDIO_LOAD_WAIT_TIMEOUT_MS` and re-checks — loading is
+       **not** a failure (measured 30B cold load: `loading` from ~1.2 s to `loaded` at
+       ~8.3 s);
+     - `not-loaded` → calls `POST /api/v1/models/load` once, then re-checks.
+  3. on failure records the reason, waits `LMSTUDIO_RETRY_INTERVAL_MS` (default 10 s),
+     and retries.
+- `lms ps --json` is **not** usable as the loading check: its `status` field reads
+  `idle` while a model is still loading.
+- `warmup()` itself is retained as the single-shot primitive (tests and E2E call it
+  directly); `ensureModelReady()` drives the loop and tracks progress in
+  `getModelLoadState()`, which `GET /api/service/status` (DESIGN.md §5.4) reports to
+  callers like `run.ps1`.
+
+When all rounds are exhausted the service **keeps running** (best-effort): translation
+falls back to `LMSTUDIO_UNAVAILABLE` while collections/history still work, and the
+failure is reported faithfully by `/api/service/status` (`lmstudio: error`). Set
+`LMSTUDIO_WARMUP=false` to skip the loop entirely.
 
 `bootstrap.ts` passes `config.lmstudioModel`, which since 2026-10-05 defaults to a
 **specific** model id rather than empty. It used to be empty, which made `resolveModel()`

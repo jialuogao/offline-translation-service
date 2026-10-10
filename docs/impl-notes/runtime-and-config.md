@@ -12,7 +12,9 @@ handlers; `bootstrap.ts#startService()` does the wiring in this order:
 2. `CollectionService.init()` — creates the default collection when the table is empty
    and repairs `meta.active_collection_id` (§4.2).
 3. `LMStudioAdapter` + `LMStudioProcessManager.startup()` — probe, then spawn if needed.
-4. `TranslationService`, `ShutdownController`, then `createApp()`.
+   If `LMSTUDIO_WARMUP` is on, `ensureModelReady()` runs **without being awaited**.
+4. `TranslationService`, `ShutdownController`, then `createApp()` (with the
+   `ServiceHealth` instance).
 5. `app.listen(config.port, config.host)`.
 6. `shutdown.attachServer(server)` — see the Shutdown section for why it is not a
    constructor argument.
@@ -23,6 +25,45 @@ while a 30B model is still loading.
 
 `startService()` deliberately does not touch `process.on(...)`, so tests can import it
 without side effects. `index.ts` registers `SIGINT`/`SIGTERM`.
+
+## Service status endpoint (§5.4, `GET /api/service/status`)
+
+`ServiceHealth` (`apps/server/src/health.ts`) is a per-module state machine, not an
+LM-Studio-only probe. Modules advance in startup order:
+
+- `db` — `loading` → `ok` (opened) or the process would have failed to start at all.
+- `storage` — a write/remove probe of the data directory. A read-only disk or full
+  volume makes history unsavable but leaves browsing usable, so this is reported as an
+  error without stopping the service.
+- `lmstudio` — driven by `processManager.getModelLoadState()`: `loading` while the
+  ensure-model-ready loop runs, `ok` once the model is resident, `error` after all
+  retries are exhausted.
+
+`snapshot()` returns `{ modules, pending, ok, errors }`. `pending` is true while **any**
+module is still `loading` — callers (run.ps1, a future callback) must keep polling until
+`pending === false`, then decide based on `ok`/`errors`. Fatal startup failures are not
+reported here: the process exits and polling detects the connection refusal instead.
+
+The endpoint is deliberately the **single** status source: run.ps1 polls it instead of
+probing LM Studio directly, so the script and the backend can never disagree about
+whether the model is ready.
+
+## Launch script behaviour (`run.ps1`)
+
+`run.ps1` starts the backend, polls `/api/collections` for readiness, then polls
+`/api/service/status` until `pending === false` (2-minute cap) and prints any failed
+module. It never probes LM Studio itself and never loads/retries models — that is the
+backend's job — so `-Model` only passes through to `LMSTUDIO_MODEL`.
+
+**Alert reporting to the personal-util-server portal.** When the portal launches
+`run.ps1` as a service `startScript` it injects `PU_REPORT_URL` and `PU_REPORT_TOKEN`;
+on a failed status (or settle timeout) the script POSTs `{ token, message }` to the
+given URL (`Send-ServiceAlert`), letting the portal attribute the alert to the service
+without the script knowing its id. The certificate skip is versioned because the portal
+uses a self-signed CA: pwsh 7 has `Invoke-RestMethod -SkipCertificateCheck`, but
+PowerShell 5.1 (which `run.ps1` must still parse) does not, so the 5.1 branch
+temporarily replaces `ServicePointManager.ServerCertificateValidationCallback` in a
+`try/finally`. Manual runs have no env vars and only print.
 
 ## Configuration
 
@@ -43,6 +84,13 @@ before importing it or inject options explicitly (the test harness does the latt
 - `LMSTUDIO_UNLOAD_TIMEOUT_MS` and `LMSTUDIO_LIST_TIMEOUT_MS` bound the two `lms`
   child processes. Exceeding either degrades (nothing is killed), so a hang in the CLI
   cannot block shutdown indefinitely.
+- The "ensure model ready" loop (see `lmstudio-lifecycle.md`) is tuned by
+  `LMSTUDIO_RETRY_ATTEMPTS` (default 3, includes the first try),
+  `LMSTUDIO_RETRY_INTERVAL_MS` (default 10 s between rounds) and
+  `LMSTUDIO_LOAD_WAIT_TIMEOUT_MS` (default 60 s to wait for `state: loaded` after a
+  load request). The first two are timeouts on the process manager itself; the last
+  bounds how long a single round waits on the official loading state before declaring
+  the round failed.
 
 ## HTTP assembly
 
@@ -50,7 +98,7 @@ before importing it or inject options explicitly (the test harness does the latt
 
 Two ordering constraints that are easy to break:
 
-1. **Routers are mounted at `/api` with full paths.** All five route modules declare
+1. **Routers are mounted at `/api` with full paths.** All six route modules declare
    paths like `/collections/active` and are mounted via `app.use('/api', router)`.
    The entries router must be registered **before** the collections router, because
    `/collections/:id` otherwise swallows `/collections/:id/entries`.

@@ -49,9 +49,11 @@ export function createFakeAdapter(initial: {
       loadCalls.push(modelId);
       // 真实端点每次成功 load 都会新建实例并把该模型标记为已加载，
       // 替身照此更新状态，便于断言"已驻留就不会再次 load"。
-      models = models.map((model) =>
-        model.id === modelId ? { ...model, state: 'loaded' as const } : model,
-      );
+      if (loadResult) {
+        models = models.map((model) =>
+          model.id === modelId ? { ...model, state: 'loaded' as const } : model,
+        );
+      }
       return loadResult;
     },
     setReachable(value: boolean): void {

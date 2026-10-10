@@ -73,6 +73,15 @@ export const config = {
   lmstudioWarmup: bool('LMSTUDIO_WARMUP', true),
   /** 显式加载模型允许的耗时（30B MoE 冷加载可能超过 60s）。 */
   lmstudioLoadTimeoutMs: int('LMSTUDIO_LOAD_TIMEOUT_MS', 300_000, 1_000),
+  /**
+   * 确保模型就绪循环的最大尝试次数（含首次，§6.3）。全部耗尽仍未 loaded 时服务
+   * **继续运行**（best-effort），状态由 `/api/service/status` 汇报。
+   */
+  lmstudioRetryAttempts: int('LMSTUDIO_RETRY_ATTEMPTS', 3, 1),
+  /** 两轮模型加载尝试之间的间隔。 */
+  lmstudioRetryIntervalMs: int('LMSTUDIO_RETRY_INTERVAL_MS', 10_000, 1_000),
+  /** 单次加载后等待 state 变 loaded 的超时（30B 冷加载实测约 8s，这里留足余量）。 */
+  lmstudioLoadWaitTimeoutMs: int('LMSTUDIO_LOAD_WAIT_TIMEOUT_MS', 60_000, 1_000),
   /** spawn lmstudio.exe 时是否显示 console 窗口（调试用，默认隐藏）。 */
   lmstudioShowConsole: bool('LMSTUDIO_SHOW_CONSOLE', false),
   /** 是否允许后端自动 spawn LM Studio（测试注入未就绪场景时置 false）。 */

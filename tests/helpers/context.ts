@@ -8,6 +8,7 @@ import { TranslationService } from '../../apps/server/src/services/translationSe
 import { LMStudioAdapter } from '../../apps/server/src/lmstudio/adapter.js';
 import { LMStudioProcessManager } from '../../apps/server/src/lmstudio/process.js';
 import { ShutdownController } from '../../apps/server/src/shutdown.js';
+import { ServiceHealth } from '../../apps/server/src/health.js';
 import { createApp } from '../../apps/server/src/http/app.js';
 import { scratchDir, listenOnSafePort, removeDbFiles } from './paths.js';
 
@@ -58,6 +59,12 @@ export interface ContextOptions {
   lmsMissing?: boolean;
   /** 记录实际发起过的 `lms` 调用，便于断言参数（`-p` / `--bind` 等）。 */
   lmsCalls?: string[][];
+  /** 服务健康状态机；缺省新建一个（只会在 `/api/service/status` 被访问时用到）。 */
+  health?: ServiceHealth;
+  /** 模型加载重试次数（§6.3 确保就绪循环）。 */
+  retryAttempts?: number;
+  /** 单次加载后等待 state 变 loaded 的超时（测试里缩短以便快速断言）。 */
+  loadWaitTimeoutMs?: number;
 }
 
 let counter = 0;
@@ -90,6 +97,9 @@ export async function createTestContext(options: ContextOptions): Promise<TestCo
     modelId: options.modelId ?? config.lmstudioModel,
     unloadTimeoutMs: 1_000,
     listTimeoutMs: 1_000,
+    retryAttempts: options.retryAttempts ?? config.lmstudioRetryAttempts,
+    retryIntervalMs: 1,
+    loadWaitTimeoutMs: options.loadWaitTimeoutMs ?? 500,
     // 默认提供一个"可定位"的 lms CLI：`lms` 由下面的内存替身应答，
     // 因此这里只是让 unload() 能走到卸载分支。设为 true 可测试"找不到 CLI"的降级。
     locate: options.lmsMissing === true
@@ -150,6 +160,7 @@ export async function createTestContext(options: ContextOptions): Promise<TestCo
     adapter,
     processManager,
     shutdown,
+    health: options.health ?? new ServiceHealth(),
     webRoot: path.join(scratch, 'no-web-root'),
     maxConcurrentStreams: options.maxConcurrentStreams ?? config.maxConcurrentStreams,
   });

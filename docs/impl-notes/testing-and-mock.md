@@ -175,7 +175,11 @@ low port, for the same reason.
 | Case | Test |
 |---|---|
 | LM Studio already running at startup | `lifecycle.test.ts` (reachable → no spawn), `translate.test.ts` (status) |
-| Not running, then started | `lifecycle.test.ts` (spawn, PID/ownership, timeout path) |
+| Not running, then started | `lifecycle.test.ts` (spawn + `serverStartArgs` `-p`/`--bind`) |
+| Ensure-model-ready: resident → no reload; not-loaded → one load | `server/lifecycle.test.ts` (§6.3) |
+| Ensure-model-ready: load fails → all retries exhausted → `failed` with reason | `server/lifecycle.test.ts` (§6.3) |
+| Ensure-model-ready: server unreachable → `failed` after retries | `server/lifecycle.test.ts` (§6.3) |
+| `GET /api/service/status` module states, `pending`, `ok`, `errors` | `status.test.ts` |
 | zh→en streaming, delta concatenation, persistence | `translate.test.ts` |
 | en→zh streaming | `translate.test.ts` |
 | Mid-stream disconnect | `translate.test.ts` (error event, nothing persisted) |

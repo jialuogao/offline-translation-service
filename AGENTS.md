@@ -335,10 +335,27 @@ mechanisms, so consolidate new findings there rather than into this file.
 
 `run.ps1` is the operator entry point: preflight (Node/pnpm versions) → `pnpm install`
 when `node_modules` is missing → `pnpm build` when build output is missing or older than
-`apps/{server,web}/src` or `packages/contracts/src` → port check → LM Studio **status probe
-only** (the backend owns starting LM Studio; the script must not run `lms server start`
-itself) → start the backend in its own window → poll `/api/collections` until ready →
-open the browser. Parameters: `-Port`, `-NoBrowser`, `-SkipBuild`, `-ForceBuild`.
+`apps/{server,web}/src` or `packages/contracts/src` → port check → start the backend in
+its own window → poll `/api/collections` until ready → **poll `/api/service/status` until
+`pending === false`** (all subsystems settled, 2-minute cap) and print any failed
+module's error → open the browser. The script **never probes LM Studio directly and never
+loads or retries models**: the backend owns starting LM Studio (`lms server start`),
+owns the "ensure model ready" loop (verify + retry, default 3 attempts), and reports
+everything through the unified status endpoint (DESIGN.md §5.4 / §6.3). Parameters:
+`-Port`, `-Model` (passed through to the backend's `LMSTUDIO_MODEL`), `-NoBrowser`,
+`-SkipBuild`, `-ForceBuild`. Failure to load the model must not block opening the UI —
+the other features (collections/history) work without translation.
+
+**Alert reporting (personal-util-server Service alerts protocol).** When the portal
+launches `run.ps1` as a service `startScript`, it injects `PU_REPORT_URL` +
+`PU_REPORT_TOKEN`; on startup failure (`/api/service/status` shows `ok: false`, or the
+2-minute settle poll times out) the script POSTs `{token, message}` to `PU_REPORT_URL`
+(`Send-ServiceAlert`). The message is a Chinese summary of the failed modules plus the
+"kill LM Studio manually" hint. Manual runs (no env vars) print only. The certificate
+skip is versioned: pwsh 7 uses `Invoke-RestMethod -SkipCertificateCheck`; PowerShell 5.1
+temporarily sets `ServicePointManager.ServerCertificateValidationCallback` in a
+`try/finally`. Keep `run.ps1` parseable by 5.1 — do not use pwsh-only syntax in the
+report branch.
 
 Rules for these files:
 
@@ -368,8 +385,10 @@ Documentation boundaries).
 
 | Path | Responsibility | Impl note |
 |---|---|---|
-| `run.ps1` / `run.cmd` | One-click launch: preflight, install/build, LM Studio probe, start, open browser | `runtime-and-config` |
+| `run.ps1` / `run.cmd` | One-click launch: preflight, install/build, start backend, poll readiness + `/api/service/status`, open browser (never loads models itself) | `runtime-and-config` |
 | `shutdown.ps1` | Programmatic shutdown: POST `/api/shutdown`, then poll until the backend is gone | `runtime-and-config` |
+| `apps/server/src/health.ts` | Service health state machine: db / storage / lmstudio modules, `GET /api/service/status` (§5.4) | `runtime-and-config` |
+| `apps/server/src/routes/status.ts` | Unified status endpoint router (`/api/service/status`) | `runtime-and-config` |
 | `apps/server/src/index.ts` | Process entry: direct-run guard, signal handlers | `runtime-and-config` |
 | `apps/server/src/bootstrap.ts` | Startup order: DB init → LM Studio startup → HTTP listen (§3.3) | `runtime-and-config` |
 | `apps/server/src/config.ts` | Environment-driven configuration (§11) | `runtime-and-config` |
@@ -383,7 +402,7 @@ Documentation boundaries).
 | `apps/server/src/db/index.ts` | Connection, schema, migrations, `meta` access (§4) | `collections-and-db` |
 | `apps/server/src/db/sqlite.ts` | `node:sqlite` adapter exposing the better-sqlite3-shaped surface | `collections-and-db` |
 | `apps/server/src/lmstudio/adapter.ts` | OpenAI-compatible client; the only LM Studio HTTP caller | `lmstudio-lifecycle` |
-| `apps/server/src/lmstudio/process.ts` | `LMStudioProcessManager`: startup, warm-up, and model unloading (§6.3, §6.4) | `lmstudio-lifecycle` |
+| `apps/server/src/lmstudio/process.ts` | `LMStudioProcessManager`: startup, "ensure model ready" retry loop, warm-up, and model unloading (§6.3, §6.4) | `lmstudio-lifecycle` |
 | `apps/server/src/lmstudio/locate.ts` | Locating `lms.exe` / `LM Studio.exe` (§6.2) | `lmstudio-lifecycle` |
 | `apps/server/src/lmstudio/lmsCli.ts` | Bounded `lms` child-process runner plus `lms ps --json` parsing (§6.4) | `lmstudio-lifecycle` |
 | `apps/server/src/lmstudio/winProcess.ts` | Port→PID lookup, process-name verification, `taskkill` — **retained but not called since §6.4 stopped process termination; ask the user before removing** | `lmstudio-lifecycle` |
