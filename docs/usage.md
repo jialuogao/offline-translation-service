@@ -36,7 +36,8 @@ pnpm build            # 共享契约 -> 前端产物 -> 后端
 
 脚本会自动完成：环境自检 → 首次运行装依赖 → 源码有改动就构建 → 检查端口 →
 在独立窗口启动后端 → 等服务就绪 → **等待各子系统状态落定**（后端自动拉起
-LM Studio 服务器并加载模型，最多重试 3 次，失败会在这里提示）→ 打开浏览器。
+LM Studio 服务器并加载模型，最多重试 3 次，失败会在这里提示）→ 打印界面地址
+（默认不自动打开浏览器；想打开就加 `-OpenBrowser`）。
 再次运行时会跳过构建，并在服务已在运行时直接给出界面地址。
 
 > LM Studio 的启动与模型加载都归后端所有：端点不可达时它执行 `lms server start`
@@ -48,7 +49,8 @@ LM Studio 服务器并加载模型，最多重试 3 次，失败会在这里提�
 
 ```powershell
 .\run.ps1 -Port 5175       # 换端口
-.\run.ps1 -NoBrowser       # 不开浏览器
+.\run.ps1 -OpenBrowser     # 就绪后自动打开浏览器（默认不开，界面地址会打印）
+.\run.ps1 -NoBrowser       # 强制不开浏览器（覆盖 -OpenBrowser；默认即不开）
 .\run.ps1 -Model <id>      # 换模型（透传给后端；默认 hy-mt2-30b-a3b-uncensored-v1-apex）
 .\run.ps1 -SkipBuild       # 跳过构建检查（更快）
 .\run.ps1 -ForceBuild      # 强制重新构建
@@ -71,8 +73,8 @@ LM Studio 服务器并加载模型，最多重试 3 次，失败会在这里提�
 若由别的项目调度本服务，用下面两个脚本，全程**不需要知道后端 PID**：
 
 ```powershell
-# 启动（-NoBrowser 必须带，否则会弹浏览器）
-pwsh -File run.ps1 -NoBrowser -Port 5197
+# 启动（默认不开浏览器，界面地址会打印出来；如需自动开浏览器可加 -OpenBrowser）
+pwsh -File run.ps1 -Port 5197
 
 # 就绪判定：轮询到 200 才可以认为启动完成
 #   GET http://127.0.0.1:5197/api/collections
@@ -97,7 +99,7 @@ pwsh -File shutdown.ps1 -Port 5197
 > `shutdown.ps1` 按设计不碰任何进程，不会代劳。
 
 > 无人值守环境下注意：这个窗口会一直挂到服务退出为止。`run.ps1` 没有隐藏窗口的开关，
-> 这是有意保留的（可见窗口便于看日志和排查）。要在后台跑，确保带 `-NoBrowser`，
+> 这是有意保留的（可见窗口便于看日志和排查）。后台跑默认就不开浏览器（无需参数），
 > 并且**用 `shutdown.ps1` 或界面「关闭服务」停服务**——关窗口或按 `Ctrl+C` 都会跳过模型卸载。
 
 注意：源码有改动时 `run.ps1` 会先构建，轮询就绪的超时值要留够。
@@ -254,7 +256,7 @@ pnpm --filter @ots/web dev        # Vite（5173），/api 代理到 5174
 | 报 `INPUT_TOO_LONG` | 原文超过 `TRANSLATE_MAX_CHARS`（默认 10000 字符）；调大该变量或分段翻译 |
 | 报 `TRANSLATION_IN_FLIGHT` | 同一合集的翻译还没结束；等待或换一个合集 |
 | 点「卸载模型」提示失败 | 看提示里的原因：多为找不到 `lms.exe` 或调用超时。可在 LM Studio 里手动卸载，或等它的空闲自动卸载 |
-| 关闭服务后想继续用 | 后端已退出，重新 `pwsh -File run.ps1 -NoBrowser` |
+| 关闭服务后想继续用 | 后端已退出，重新 `pwsh -File run.ps1`（默认不开浏览器，界面地址会打印） |
 | 端口 5174 被占用 | 改 `PORT`，或结束占用该端口的进程（先用 `netstat -ano -p tcp \| findstr :5174` 确认 PID，不要按进程名批量清理） |
 
 ## 数据与隐私

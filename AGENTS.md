@@ -338,12 +338,14 @@ when `node_modules` is missing → `pnpm build` when build output is missing or 
 `apps/{server,web}/src` or `packages/contracts/src` → port check → start the backend in
 its own window → poll `/api/collections` until ready → **poll `/api/service/status` until
 `pending === false`** (all subsystems settled, 2-minute cap) and print any failed
-module's error → open the browser. The script **never probes LM Studio directly and never
+module's error → print the URL. The browser opens only when `-OpenBrowser` is passed;
+the default is no browser. The script **never probes LM Studio directly and never
 loads or retries models**: the backend owns starting LM Studio (`lms server start`),
 owns the "ensure model ready" loop (verify + retry, default 3 attempts), and reports
 everything through the unified status endpoint (DESIGN.md §5.4 / §6.3). Parameters:
 `-Port`, `-Model` (passed through to the backend's `LMSTUDIO_MODEL`), `-NoBrowser`,
-`-SkipBuild`, `-ForceBuild`. Failure to load the model must not block opening the UI —
+`-OpenBrowser`, `-SkipBuild`, `-ForceBuild`. `-NoBrowser` forces no browser even when
+`-OpenBrowser` is given. Failure to load the model must not block opening the UI —
 the other features (collections/history) work without translation.
 
 **Alert reporting (personal-util-server Service alerts protocol).** When the portal
@@ -385,7 +387,7 @@ Documentation boundaries).
 
 | Path | Responsibility | Impl note |
 |---|---|---|
-| `run.ps1` / `run.cmd` | One-click launch: preflight, install/build, start backend, poll readiness + `/api/service/status`, open browser (never loads models itself) | `runtime-and-config` |
+| `run.ps1` / `run.cmd` | One-click launch: preflight, install/build, start backend, poll readiness + `/api/service/status`, print URL (browser only with `-OpenBrowser`; never loads models itself) | `runtime-and-config` |
 | `shutdown.ps1` | Programmatic shutdown: POST `/api/shutdown`, then poll until the backend is gone | `runtime-and-config` |
 | `apps/server/src/health.ts` | Service health state machine: db / storage / lmstudio modules, `GET /api/service/status` (§5.4) | `runtime-and-config` |
 | `apps/server/src/routes/status.ts` | Unified status endpoint router (`/api/service/status`) | `runtime-and-config` |

@@ -4,11 +4,13 @@
 
 .DESCRIPTION
   依次完成：环境自检 → 必要时安装依赖 → 必要时构建 → 确保 LM Studio 服务器与
-  模型就绪（自动 load，失败重试 3 次）→ 启动后端（独立窗口）→ 等待就绪 → 打开浏览器。
+  模型就绪（自动 load，失败重试 3 次）→ 启动后端（独立窗口）→ 等待就绪 →
+  打印界面地址（默认不自动打开浏览器；需要时加 -OpenBrowser）。
 
   双击或右键"使用 PowerShell 运行"即可；也可以在终端里执行：
       pwsh -File run.ps1
-      .\run.ps1 -Port 5175 -NoBrowser
+      .\run.ps1 -Port 5175
+      .\run.ps1 -OpenBrowser
 
 .PARAMETER Port
   后端端口，默认 5174。
@@ -19,7 +21,10 @@
   注意：本服务只认这一个模型（加载/卸载都以它为准），换模型请显式指定。
 
 .PARAMETER NoBrowser
-  不自动打开浏览器。
+  不自动打开浏览器。默认即不打开；显式指定可覆盖 -OpenBrowser。
+
+.PARAMETER OpenBrowser
+  就绪后自动打开浏览器（默认不打开；与 -NoBrowser 同时给出时以 -NoBrowser 为准）。
 
 .PARAMETER SkipBuild
   跳过构建检查（源码没改时可省几秒）。
@@ -29,13 +34,18 @@
 
 .EXAMPLE
   .\run.ps1
-  最常用：直接用默认端口 5174 启动并打开界面。
+  最常用：直接用默认端口 5174 启动并打印界面地址（默认不开浏览器）。
+
+.EXAMPLE
+  .\run.ps1 -OpenBrowser
+  就绪后自动打开浏览器界面。
 #>
 [CmdletBinding()]
 param(
   [int]$Port = 5174,
   [string]$Model = '',
   [switch]$NoBrowser,
+  [switch]$OpenBrowser,
   [switch]$SkipBuild,
   [switch]$ForceBuild
 )
@@ -48,6 +58,9 @@ $serviceEntry = Join-Path $root 'apps\server\dist\index.js'
 $webIndex = Join-Path $root 'apps\server\public\index.html'
 $installMarker = Join-Path $root 'node_modules\.modules.yaml'
 $url = "http://127.0.0.1:$Port/"
+
+# 浏览器策略：默认不开浏览器（-OpenBrowser 显式要求时才打开；-NoBrowser 恒优先）。
+$openBrowser = $OpenBrowser -and (-not $NoBrowser)
 
 # 模型由后端负责加载（§6.3：后端启动后运行"确保模型就绪"循环并写进
 # /api/service/status）。`-Model` 参数只是**透传给后端**的 LMSTUDIO_MODEL
@@ -203,7 +216,7 @@ if (Test-Service $Port) {
   Write-Warn2 '该端口已经有本服务在运行'
   Write-Host ''
   Write-Host "界面地址：$url" -ForegroundColor Green
-  if (-not $NoBrowser) { Start-Process $url | Out-Null }
+  if ($openBrowser) { Start-Process $url | Out-Null }
   exit 0
 }
 try {
@@ -236,6 +249,7 @@ $server = Start-Process -FilePath 'pnpm.cmd' -ArgumentList @('start') -WorkingDi
 if ($null -eq $server) { Fail '无法启动后端进程' }
 
 Write-Note "PID $($server.Id)"
+Write-Host "界面地址：$url（就绪后即可访问）" -ForegroundColor Green
 
 # ---------------------------------------------------------------- 6. 等待就绪
 Write-Step '等待服务就绪'
@@ -304,8 +318,8 @@ if ($statusDone) {
   Send-ServiceAlert '离线翻译服务启动超时（120 秒内子系统状态未落定）；模型可能未加载'
 }
 
-# ---------------------------------------------------------------- 7. 打开界面
-if (-not $NoBrowser) {
+# ---------------------------------------------------------------- 7. 打开界面（可选）
+if ($openBrowser) {
   try {
     Start-Process $url | Out-Null
     Write-Ok '已打开浏览器'
