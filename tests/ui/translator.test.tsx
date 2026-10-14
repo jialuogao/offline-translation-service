@@ -7,8 +7,8 @@ import { Translator } from '../../apps/web/src/components/Translator';
 /**
  * 译文输出框的 DOM 回归测试（DESIGN.md §9.1）。
  *
- * 只验证渲染结构：输出框必须在**原文输入框之后**，并且内容随流式增量更新、
- * 完成后保留。翻译业务本身由 tests/server/translate.test.ts 覆盖。
+ * 验证输出框渲染位置、流式高度写入行为和清空/完成状态。翻译业务本身由
+ * tests/server/translate.test.ts 覆盖。
  */
 
 // 让 React 18 认得以 act(...) 包裹的更新，否则每次渲染都会打印告警。
@@ -20,32 +20,42 @@ interface RenderOptions {
   outputSaved?: boolean;
 }
 
+function translator(options: RenderOptions = {}): JSX.Element {
+  return (
+    <Translator
+      sourceText="待翻译的原文"
+      sourceLang="zh"
+      targetLang="en"
+      onSourceTextChange={() => undefined}
+      onDirectionChange={() => undefined}
+      onTranslate={() => undefined}
+      onCancel={() => undefined}
+      onClearSource={() => undefined}
+      onSaveDirect={() => undefined}
+      translating={options.outputStreaming ?? false}
+      disabled={false}
+      maxChars={10000}
+      outputText={options.outputText ?? ''}
+      outputStreaming={options.outputStreaming ?? false}
+      outputSaved={options.outputSaved ?? false}
+      outputModelId={options.outputSaved === true ? 'mock-model' : null}
+      onClearOutput={() => undefined}
+    />
+  );
+}
+
 function render(container: HTMLElement, options: RenderOptions = {}): Root {
   const root = createRoot(container);
   act(() => {
-    root.render(
-      <Translator
-        sourceText="待翻译的原文"
-        sourceLang="zh"
-        targetLang="en"
-        onSourceTextChange={() => undefined}
-        onDirectionChange={() => undefined}
-        onTranslate={() => undefined}
-        onCancel={() => undefined}
-        onClearSource={() => undefined}
-        onSaveDirect={() => undefined}
-        translating={options.outputStreaming ?? false}
-        disabled={false}
-        maxChars={10000}
-        outputText={options.outputText ?? ''}
-        outputStreaming={options.outputStreaming ?? false}
-        outputSaved={options.outputSaved ?? false}
-        outputModelId={options.outputSaved === true ? 'mock-model' : null}
-        onClearOutput={() => undefined}
-      />,
-    );
+    root.render(translator(options));
   });
   return root;
+}
+
+function rerender(root: Root, options: RenderOptions = {}): void {
+  act(() => {
+    root.render(translator(options));
+  });
 }
 
 function input(container: HTMLElement): HTMLTextAreaElement {
@@ -90,6 +100,54 @@ describe('译文输出框', () => {
       (button) => button.textContent === '清空',
     );
     expect(clearButton?.disabled).toBe(true);
+
+    act(() => root.unmount());
+  });
+
+  it('流式追加时只增高不重置，清空时回到最小高度', () => {
+    const container = document.createElement('div');
+    const root = render(container);
+    const textarea = output(container) as HTMLTextAreaElement;
+    const heightWrites: string[] = [];
+    let styleHeight = textarea.style.height;
+    let contentHeight = 200;
+
+    Object.defineProperty(textarea.style, 'height', {
+      configurable: true,
+      get: () => styleHeight,
+      set: (value: string) => {
+        styleHeight = value;
+        heightWrites.push(value);
+      },
+    });
+    Object.defineProperty(textarea, 'scrollHeight', {
+      configurable: true,
+      get: () => contentHeight,
+    });
+    Object.defineProperty(textarea, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        height: styleHeight === '' || styleHeight === 'auto' ? 140 : Number.parseFloat(styleHeight),
+      }) as DOMRect,
+    });
+
+    rerender(root, { outputText: 'A', outputStreaming: true });
+    expect(textarea.style.height).toBe('200px');
+    expect(heightWrites).toEqual(['200px']);
+
+    contentHeight = 300;
+    rerender(root, { outputText: 'AB', outputStreaming: true });
+    expect(textarea.style.height).toBe('300px');
+    expect(heightWrites).toEqual(['200px', '300px']);
+
+    contentHeight = 100;
+    rerender(root, { outputText: 'B' });
+    expect(textarea.style.height).toBe('100px');
+    expect(heightWrites.slice(2)).toEqual(['auto', '100px']);
+
+    rerender(root);
+    expect(textarea.style.height).toBe('');
+    expect(heightWrites.at(-1)).toBe('');
 
     act(() => root.unmount());
   });

@@ -164,11 +164,20 @@ forgotten; clicking a collection writes the memory) and `tests/ui/preferences.te
   清空 actions; 清空 only clears the box and never touches source input or history.
   Clearing source input also clears the output. Direct-save clears the output after its
   async callback settles; `App` clears source input after `useEntries.addEntry` settles.
-  - **The box auto-grows with its content.** On every `text` change an effect sets the
-    textarea height to its `scrollHeight` (reset to `auto` first, so it shrinks back to
-    `min-height` when cleared). The CSS has **no `max-height` cap** and `overflow: hidden`
-    — a long translation stretches the box instead of scrolling internally, and 清空
-    returns it to the minimum height. `resize: vertical` is kept for manual adjustment.
+  - **The box auto-grows with its content.** On append-only text updates, the effect only
+    increases the textarea height when `scrollHeight` exceeds the rendered height; it
+    never temporarily resets to `auto`. This avoids collapsing the document on each
+    streaming delta, which can clamp the browser's page scroll position. Replacing the
+    output with unrelated/shorter text remeasures from `auto`, and clearing removes the
+    inline height so CSS `min-height` applies. The CSS has **no `max-height` cap** and
+    `overflow: hidden` — a long translation stretches the box instead of scrolling
+    internally. `resize: vertical` is kept for manual adjustment.
+    `tests/ui/translator.test.tsx` (`流式追加时只增高不重置，清空时回到最小高度`)
+    verifies append-only height writes, clear reset, and recalculation for replacement
+    text. A Chromium run at a 390px viewport with synthetic SSE deltas and wheel input
+    showed the document growing while `window.scrollY` advanced without retraction during
+    streaming. This is not a physical-device touch test; verify touch scrolling on target
+    phones separately when available.
 - The streaming row in the history list still exists (newest row, grows as deltas
   arrive), so the same translation is visible in two places by design: the box for
   reading/copying, the history row for the record.

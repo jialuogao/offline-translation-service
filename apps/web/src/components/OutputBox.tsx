@@ -32,13 +32,32 @@ export function OutputBox({
 }: OutputBoxProps): JSX.Element {
   const [copied, setCopied] = useState(false);
 
-  // 让输出框随内容自动拉长（流式期间随增量逐字增高），清空时自动回缩到最小高度。
+  // 流式追加时只增高，避免临时塌缩导致浏览器回收页面滚动位置。
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const previousTextRef = useRef(text);
   useEffect(() => {
     const node = textareaRef.current;
     if (!node) return;
-    node.style.height = 'auto';
-    node.style.height = `${node.scrollHeight}px`;
+    const previousText = previousTextRef.current;
+    previousTextRef.current = text;
+
+    if (text === '') {
+      node.style.height = '';
+      return;
+    }
+
+    const isAppend = text.startsWith(previousText);
+    if (!isAppend) {
+      node.style.height = 'auto';
+    }
+
+    const nextHeight = node.scrollHeight;
+    if (!isAppend || nextHeight > node.getBoundingClientRect().height) {
+      const nextStyleHeight = `${nextHeight}px`;
+      if (node.style.height !== nextStyleHeight) {
+        node.style.height = nextStyleHeight;
+      }
+    }
   }, [text]);
 
   const hasText = text !== '';
